@@ -1,14 +1,17 @@
 /**
  * GenServer — the generic server behaviour in JavaScript.
  *
- * GenServer abstracts the message loop, call/cast/info dispatch,
- * name registration, and lifecycle (init/terminate/codeChange).
- * Subclass it and override the handler methods you need.
+ * In real QuickBEAM, each GenServer runs as a separate BEAM process
+ * with its own QuickJS context. startLink() serializes the class
+ * definition into a spawn script.
+ *
+ * In the mock/test environment, startLink() bypasses script generation
+ * and uses direct closure spawning (spawnMockFn).
  *
  * @module gen-server
  */
 
-import { Beam, BeamPid } from "./beam-shim.js";
+import { Beam, BeamPid, BeamRef } from "./beam-shim.js";
 import { BeamOtpError } from "./errors.js";
 import type {
   From,
@@ -21,67 +24,56 @@ import type {
   GenSystemMessage,
 } from "./types.js";
 
+// ── Detect environment ─────────────────────────────────────────────
+
+function isMockEnvironment(): boolean {
+  // In test: the first spawned pid has id=0 or we detect the mock marker
+  return (globalThis as any).__quickbeam_mock !== undefined;
+}
+
+// ── Library bootstrap (for real QuickBEAM spawn scripts) ───────────
+
+let _libraryBootstrap: string | null = null;
+
+function getLibraryBootstrap(): string {
+  if (_libraryBootstrap) return _libraryBootstrap;
+  _libraryBootstrap = `
+if (typeof QuickbeamJs === "undefined") {
+  if (typeof require === "undefined") {
+    throw new Error("QuickbeamJs not loaded. Ensure quickbeam-js is pre-loaded.");
+  }
+}
+const { GenServer: _QbGenServer, runGenServerLoop } = QuickbeamJs;
+`.trim();
+  return _libraryBootstrap;
+}
+
+export function resetLibraryBootstrap(): void {
+  _libraryBootstrap = null;
+}
+
 // ── Abstract GenServer ─────────────────────────────────────────────
 
-/**
- * Generic server base class. Subclass and override handler methods.
- *
- * @example
- * ```ts
- * class Counter extends GenServer {
- *   async init() { return { count: 0 }; }
- *   async handleCall(msg, _from, state) {
- *     if (msg === "inc") return { reply: ++state.count, state };
- *     if (msg === "get") return { reply: state.count, state };
- *     throw new Error(`unknown call: ${msg}`);
- *   }
- * }
- * ```
- */
 export abstract class GenServer {
-  /**
-   * Called once at startup. Return the initial state.
-   * Default: returns `undefined`.
-   */
   async init(_args?: any): Promise<any> {
     return undefined;
   }
 
-  /**
-   * Handle a synchronous call. MUST return `{ reply, state }`.
-   * Throw to crash the GenServer.
-   */
   async handleCall(_message: any, _from: From, _state: any): Promise<CallResult> {
     throw new Error(`handleCall not implemented. Received: ${JSON.stringify(_message)}`);
   }
 
-  /**
-   * Handle an asynchronous cast. MUST return `{ state }`.
-   * Throw to log-and-continue (default) or crash (if throwOnCastError).
-   */
   async handleCast(_message: any, state: any): Promise<CastResult> {
     return { state };
   }
 
-  /**
-   * Handle an arbitrary message (info). MUST return `{ state }`.
-   * Receives any message not tagged as "call", "cast", or "system".
-   */
   async handleInfo(_message: any, state: any): Promise<InfoResult> {
     return { state };
   }
 
-  /**
-   * Called when the GenServer is shutting down (normal or crash).
-   * The return value is ignored — this is for cleanup.
-   */
   async terminate(_reason: any, _state: any): Promise<void> {
-    // no-op by default
   }
 
-  /**
-   * Called after a hot code upgrade. Return the new state.
-   */
   async codeChange(_oldVsn: any, state: any, _extra: any): Promise<any> {
     return state;
   }
@@ -92,7 +84,7 @@ export abstract class GenServer {
    * Start a GenServer, link it to the caller, and optionally register it.
    *
    * @param cls - The GenServer subclass constructor.
-   * @param config - Name, args, timeout, hibernate_after.
+   * @param config - Name, args, timeout.
    * @returns The PID of the started process.
    */
   static async startLink(
@@ -100,44 +92,23 @@ export abstract class GenServer {
     config?: GenServerConfig,
   ): Promise<BeamPid> {
     const { name, args } = config ?? {};
-    const instance = new cls();
-    const initial = await instance.init(args);
 
-    // Check if name is already taken
     if (name && Beam.whereis(name)) {
       throw BeamOtpError.alreadyStarted(name);
     }
 
-    // Spawn a new process that runs the GenServer loop
-    const pid = await Beam.spawn(async () => {
-      const self = Beam.self();
+    const instance = new cls();
+    const initialState = await instance.init(args);
 
-      // Register under the given name
-      if (name) {
-        Beam.register(name, self);
-      }
+    if (isMockEnvironment()) {
+      return spawnMockGenServer(instance, initialState, name);
+    }
 
-      // Enter the message loop
-      await runLoop(instance, initial, config);
-    });
-
-    // Link the caller to the child (crash propagation)
-    Beam.link(pid);
-
-    return pid;
+    return spawnRealGenServer(cls, instance, initialState, name, args);
   }
 
   /**
    * Make a synchronous call to a GenServer.
-   *
-   * Sends a `{ type: "call", ref, from, message }` to the target and
-   * blocks until a `{ type: "reply", ref, result }` arrives or timeout.
-   *
-   * @param target - Registered name or PID.
-   * @param message - The message to send.
-   * @param timeout - Milliseconds to wait (default: 5000).
-   * @returns The reply value.
-   * @throws BeamOtpError on timeout, exit, or noproc.
    */
   static async call(
     target: string | BeamPid,
@@ -157,50 +128,42 @@ export abstract class GenServer {
     };
 
     return new Promise<any>((resolve, reject) => {
+      let settled = false;
+      let monRef: BeamRef | null = null;
+
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        replyHandlers.delete(refKey(ref));
+        if (monRef) Beam.demonitor(monRef);
         reject(BeamOtpError.timeout(`GenServer.call to '${target}'`, ms));
       }, ms);
 
-      // Register a one-shot handler for the reply
-      const prevHandler = (globalThis as any).__quickbeam_js_reply_handlers ?? new Map();
-      (globalThis as any).__quickbeam_js_reply_handlers = prevHandler;
+      const replyHandlers = getReplyHandlers();
 
-      prevHandler.set(ref, (reply: GenReplyMessage) => {
+      replyHandlers.set(refKey(ref), (reply: GenReplyMessage) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        prevHandler.delete(ref);
+        replyHandlers.delete(refKey(ref));
+        if (monRef) Beam.demonitor(monRef);
         resolve(reply.result);
       });
 
-      // Also listen for exit of the target
-      const exitHandler = (_pid: BeamPid, reason: any) => {
+      monRef = Beam.monitor(pid, (reason: any) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        prevHandler.delete(ref);
+        replyHandlers.delete(refKey(ref));
         reject(BeamOtpError.exit(String(target), reason));
-      };
-      const monRef = Beam.monitor(pid, exitHandler);
+      });
 
-      // Cleanup on resolve/reject
-      const cleanup = () => {
-        Beam.demonitor(monRef);
-      };
-
-      const origResolve = resolve;
-      const origReject = reject;
-      resolve = ((val: any) => { cleanup(); origResolve(val); }) as any;
-      reject = ((err: any) => { cleanup(); origReject(err); }) as any;
-
-      // Send the call
       Beam.send(pid, callMsg);
     });
   }
 
   /**
    * Send an asynchronous cast to a GenServer.
-   *
-   * Sends `{ type: "cast", message }` — no reply, no confirmation.
-   *
-   * @param target - Registered name or PID.
-   * @param message - The message to send.
    */
   static cast(target: string | BeamPid, message: any): void {
     const pid = resolveTarget(target);
@@ -208,25 +171,73 @@ export abstract class GenServer {
   }
 }
 
-// ── Message Loop ───────────────────────────────────────────────────
+// ── Spawn helpers ──────────────────────────────────────────────────
 
-interface LoopConfig {
-  timeout?: number;
-  hibernate_after?: number;
+async function spawnMockGenServer(
+  instance: GenServer,
+  initialState: any,
+  name: string | undefined,
+): Promise<BeamPid> {
+  const pid = (Beam.spawn as any)(async () => {
+    if (name) Beam.register(name);
+    await runLoop(instance, initialState, name);
+  }) as BeamPid;
+  Beam.link(pid);
+  return pid;
 }
+
+async function spawnRealGenServer(
+  _cls: new () => GenServer,
+  _instance: GenServer,
+  _initialState: any,
+  name: string | undefined,
+  args: any,
+): Promise<BeamPid> {
+  const classSource = _cls.toString();
+  const argsJson = JSON.stringify(args ?? null);
+  const nameJson = JSON.stringify(name ?? null);
+  const bootstrap = getLibraryBootstrap();
+
+  const script = `
+${bootstrap}
+
+const _UserClass = (${classSource});
+Object.setPrototypeOf(_UserClass.prototype, _QbGenServer.prototype);
+Object.setPrototypeOf(_UserClass, _QbGenServer);
+
+const _inst = new _UserClass();
+const _args = ${argsJson};
+const _name = ${nameJson};
+
+_inst.init(_args).then(function(_state) {
+  if (_name) Beam.register(_name);
+  runGenServerLoop(_inst, _state);
+}).catch(function(err) { throw err; });
+`.trim();
+
+  const pid = Beam.spawn(script);
+  Beam.link(pid);
+  return pid;
+}
+
+// ── Message Loop ───────────────────────────────────────────────────
 
 async function runLoop(
   instance: GenServer,
   initialState: any,
-  _config?: LoopConfig,
+  _name?: string,
 ): Promise<void> {
   let state = initialState;
-  void _config;
   const selfPid = Beam.self();
 
   Beam.onMessage(async (msg: any) => {
     state = await dispatch(instance, msg, state, selfPid);
   });
+}
+
+/** Exported for spawn scripts to call from within the child process. */
+export function runGenServerLoop(instance: GenServer, initialState: any): void {
+  runLoop(instance, initialState);
 }
 
 async function dispatch(
@@ -235,25 +246,22 @@ async function dispatch(
   state: any,
   selfPid: BeamPid,
 ): Promise<any> {
+  void selfPid;
   switch (msg.type) {
     case "call": {
       const callMsg = msg as GenCallMessage;
       try {
         const from: From = { pid: callMsg.from, ref: callMsg.ref };
         const result = await instance.handleCall(callMsg.message, from, state);
-        // Send reply to caller
-        const replyMsg: GenReplyMessage = {
+        Beam.send(callMsg.from, {
           type: "reply",
           ref: callMsg.ref,
           result: result.reply,
-        };
-        Beam.send(callMsg.from, replyMsg);
+        } satisfies GenReplyMessage);
         return result.state;
       } catch (err) {
-        // Handler threw — exit the GenServer with the error
         await safeTerminate(instance, err, state);
-        Beam.exitProcess(selfPid, err);
-        return state;
+        throw err;
       }
     }
 
@@ -262,7 +270,6 @@ async function dispatch(
         const result = await instance.handleCast(msg.message, state);
         return result.state;
       } catch (err) {
-        // Default: log and continue. Set throwOnCastError for crash behaviour.
         console.error(`[GenServer] handleCast error:`, err);
         return state;
       }
@@ -273,8 +280,7 @@ async function dispatch(
       switch (sysMsg.action) {
         case "shutdown":
           await safeTerminate(instance, sysMsg.payload ?? "shutdown", state);
-          Beam.exitProcess(selfPid, "shutdown");
-          return state;
+          throw new Error("shutdown");
         case "code_change":
           return await instance.codeChange(sysMsg.payload?.oldVsn, state, sysMsg.payload?.extra);
         default:
@@ -283,7 +289,6 @@ async function dispatch(
     }
 
     default: {
-      // Treat as info — anything not call/cast/system
       try {
         const result = await instance.handleInfo(msg, state);
         return result.state;
@@ -309,18 +314,25 @@ async function safeTerminate(
 
 // ── Internal Helpers ───────────────────────────────────────────────
 
-/**
- * Resolve a target (name or PID) to a concrete PID.
- * Throws `noproc` if the name is not registered.
- */
 function resolveTarget(target: string | BeamPid): BeamPid {
-  // QuickBEAM PIDs are typically strings like "<0.123.0>"
-  if (typeof target === "string" && target.startsWith("<") && target.endsWith(">")) {
+  if (typeof target === "object" && target !== null && (target as any).__beam_type__ === "pid") {
     return target;
   }
-  const pid = Beam.whereis(target);
+  const pid = Beam.whereis(target as string);
   if (!pid) {
-    throw BeamOtpError.noproc(target);
+    throw BeamOtpError.noproc(target as string);
   }
   return pid;
+}
+
+function getReplyHandlers(): Map<string, (reply: any) => void> {
+  const existing = (globalThis as any).__quickbeam_js_reply_handlers as Map<string, (reply: any) => void> | undefined;
+  if (existing) return existing;
+  const m = new Map<string, (reply: any) => void>();
+  (globalThis as any).__quickbeam_js_reply_handlers = m;
+  return m;
+}
+
+function refKey(ref: BeamRef): string {
+  return "ref:" + ((ref as any).id ?? String(ref));
 }

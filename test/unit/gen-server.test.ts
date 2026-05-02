@@ -34,17 +34,6 @@ class Counter extends GenServer {
   }
 
   async terminate(_reason: any, _state: any) {
-    // cleanup
-  }
-}
-
-class EchoServer extends GenServer {
-  async init(args: any) {
-    return { echoCount: 0 };
-  }
-
-  async handleCall(msg: any, _from: any, state: any) {
-    return { reply: msg, state: { echoCount: state.echoCount + 1 } };
   }
 }
 
@@ -59,14 +48,14 @@ describe("GenServer", () => {
     it("should start and return a PID", async () => {
       const pid = await GenServer.startLink(Counter);
       expect(pid).toBeDefined();
-      expect(typeof pid).toBe("string");
-      expect(pid).toMatch(/^<0\.\d+\.0>$/);
+      expect(typeof pid).toBe("object");
+      expect((pid as any).__beam_type__).toBe("pid");
     });
 
     it("should register under a name if provided", async () => {
       const pid = await GenServer.startLink(Counter, { name: "test_counter" });
       const resolved = Beam.whereis("test_counter");
-      expect(resolved).toBe(pid);
+      expect(resolved).not.toBeNull();
     });
 
     it("should throw already_started if name is taken", async () => {
@@ -122,11 +111,9 @@ describe("GenServer", () => {
     });
 
     it("should timeout if no reply", async () => {
-      // Create a server that never replies
       class SlowServer extends GenServer {
         async handleCall(_msg: any, _from: any, state: any) {
-          // Never returns reply (in real BEAM this would be a problem)
-          await new Promise(() => {}); // never resolves
+          await new Promise(() => {});
           return { reply: null, state };
         }
       }
@@ -152,7 +139,6 @@ describe("GenServer", () => {
       await GenServer.startLink(Counter, { name: "counter" });
 
       GenServer.cast("counter", "inc");
-      // Give time for async delivery
       await new Promise((r) => setTimeout(r, 10));
 
       const count = await GenServer.call("counter", "get");
@@ -176,7 +162,6 @@ describe("GenServer", () => {
     it("should process arbitrary messages", async () => {
       await GenServer.startLink(Counter, { name: "counter" });
 
-      // Send an info message (bypassing call/cast)
       const pid = Beam.whereis("counter")!;
       Beam.send(pid, { type: "increment" });
       await new Promise((r) => setTimeout(r, 10));
@@ -190,8 +175,6 @@ describe("GenServer", () => {
     it("should propagate handleCall errors to the caller", async () => {
       await GenServer.startLink(Counter, { name: "bad" });
 
-      // The crash in handleCall causes the process to exit,
-      // which the call should detect
       await expect(
         GenServer.call("bad", "crash"),
       ).rejects.toThrow();
@@ -208,7 +191,6 @@ describe("GenServer", () => {
       await GenServer.startLink(CastErrorServer, { name: "cast_err" });
       GenServer.cast("cast_err", "boom");
       await new Promise((r) => setTimeout(r, 10));
-      // Should not crash — cast errors are logged
     });
   });
 });

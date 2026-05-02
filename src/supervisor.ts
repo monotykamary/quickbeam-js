@@ -4,7 +4,7 @@
  * @module supervisor
  */
 
-import { Beam, BeamPid } from "./beam-shim.js";
+import { Beam, BeamPid, BeamRef } from "./beam-shim.js";
 import { BeamOtpError } from "./errors.js";
 import type {
   ChildSpec,
@@ -69,7 +69,7 @@ async function createSupervisor(config: SupervisorConfig): Promise<SupervisorInt
   const children = new Map<string, ChildState>();
   const startOrder: string[] = [];
   let shuttingDown = false;
-  let inRestart = false; // suppress handleChildExit during controlled restarts
+  let inRestart = false;
   const restartTimestamps: number[] = [];
   const pid = Beam.self();
 
@@ -82,7 +82,10 @@ async function createSupervisor(config: SupervisorConfig): Promise<SupervisorInt
     restartTimestamps.push(now);
     if (restartTimestamps.length > max_restarts) {
       const err = BeamOtpError.restartLimit(max_restarts, max_seconds);
-      shutdownAll().then(() => Beam.exit("shutdown"));
+      shutdownAll().then(() => {
+        // Supervisor exits by throwing in its message handler
+        throw err;
+      });
       throw err;
     }
   }
@@ -102,14 +105,14 @@ async function createSupervisor(config: SupervisorConfig): Promise<SupervisorInt
     const shutdownMs = child.spec.shutdown ?? 5000;
     const childPid = child.pid;
 
-    // Use Promise-based monitoring for proper async exit handling
-    let monRef: string | null = null;
+    let monRef: BeamRef | null = null;
     const exitPromise = new Promise<void>((resolve) => {
       monRef = Beam.monitor(childPid, () => {
         resolve();
       });
     });
 
+    // Send shutdown message to child process
     Beam.send(childPid, { type: "system", action: "shutdown", payload: "shutdown" });
 
     if (shutdownMs === "infinity") {
@@ -120,7 +123,8 @@ async function createSupervisor(config: SupervisorConfig): Promise<SupervisorInt
         sleep(shutdownMs as number).then(() => "timeout" as const),
       ]);
       if (result === "timeout") {
-        Beam.exitProcess(childPid, "kill");
+        // Force kill by sending a message that causes the child to crash
+        Beam.send(childPid, { type: "system", action: "shutdown", payload: "kill" });
         await exitPromise;
       }
     }
@@ -183,7 +187,7 @@ async function createSupervisor(config: SupervisorConfig): Promise<SupervisorInt
     child.pid = newPid;
     child.startTime = Date.now();
 
-    const monRef = Beam.monitor(newPid, (_p, reason) => {
+    const monRef = Beam.monitor(newPid, (reason: any) => {
       handleChildExit(id, reason);
     });
     child.monitorRef = monRef;
@@ -231,17 +235,16 @@ async function createSupervisor(config: SupervisorConfig): Promise<SupervisorInt
 
   async function startChildInternal(spec: ChildSpec): Promise<BeamPid> {
     const childPid = await spec.start();
+    const monRef = Beam.monitor(childPid, (reason: any) => {
+      handleChildExit(spec.id, reason);
+    });
     const childState: ChildState = {
       spec,
       pid: childPid,
-      monitorRef: null,
+      monitorRef: monRef,
       restarts: 0,
       startTime: Date.now(),
     };
-    const monRef = Beam.monitor(childPid, (_p, reason) => {
-      handleChildExit(spec.id, reason);
-    });
-    childState.monitorRef = monRef;
     children.set(spec.id, childState);
     return childPid;
   }
@@ -294,7 +297,6 @@ async function createSupervisor(config: SupervisorConfig): Promise<SupervisorInt
 
     async _terminateChild(id: string): Promise<void> {
       if (!children.has(id)) throw BeamOtpError.notFound("child", id);
-      // Demonitor the child BEFORE terminating so the exit doesn't trigger restart
       const child = children.get(id)!;
       if (child.monitorRef) {
         Beam.demonitor(child.monitorRef);

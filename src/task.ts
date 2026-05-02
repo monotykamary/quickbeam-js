@@ -1,13 +1,6 @@
 /**
  * Task — fire-and-forget and awaitable one-shot computations.
  *
- * `Task.async(fn)` spawns a new process, runs `fn`, and returns a ref.
- * `Task.await(ref)` blocks until the result arrives (or timeout).
- * `Task.start(fn)` is fire-and-forget — no result is collected.
- *
- * Uses BEAM message passing for result delivery from the spawned
- * process back to the caller.
- *
  * @module task
  */
 
@@ -21,15 +14,17 @@ interface PendingTask {
   resolve: ((result: any) => void) | null;
   reject: ((err: Error) => void) | null;
   timer: ReturnType<typeof setTimeout> | null;
-  pid: BeamPid;
-  /** Store early result if it arrives before await_() is called. */
+  pid: BeamPid | null;
   earlyResult?: { ok: true; value: any } | { ok: false; error: string; stack?: string };
 }
 
-const pendingTasks = new Map<BeamRef, PendingTask>();
+const pendingTasks = new Map<string, PendingTask>();
+
+function taskKey(ref: BeamRef): string {
+  return "task:" + ((ref as any).id ?? String(ref));
+}
 
 function ensureTaskListener(): void {
-  // Check global flag (resettable by mock setup)
   if ((globalThis as any).__quickbeam_js_task_listener_setup) return;
   (globalThis as any).__quickbeam_js_task_listener_setup = true;
 
@@ -37,24 +32,22 @@ function ensureTaskListener(): void {
     if (!msg || typeof msg !== "object") return;
 
     if (msg.type === "task_result" && msg.ref) {
-      const entry = pendingTasks.get(msg.ref);
+      const entry = pendingTasks.get(taskKey(msg.ref));
       if (entry) {
         if (entry.timer) clearTimeout(entry.timer);
         if (entry.resolve) {
-          // await_() already called — resolve immediately
-          pendingTasks.delete(msg.ref);
+          pendingTasks.delete(taskKey(msg.ref));
           entry.resolve(msg.result);
         } else {
-          // await_() not called yet — store for later
           entry.earlyResult = { ok: true, value: msg.result };
         }
       }
     } else if (msg.type === "task_error" && msg.ref) {
-      const entry = pendingTasks.get(msg.ref);
+      const entry = pendingTasks.get(taskKey(msg.ref));
       if (entry) {
         if (entry.timer) clearTimeout(entry.timer);
         if (entry.reject) {
-          pendingTasks.delete(msg.ref);
+          pendingTasks.delete(taskKey(msg.ref));
           entry.reject(
             new BeamOtpError("BeamOtpError:exit", `Task failed: ${msg.error}`, { reason: msg.stack }),
           );
@@ -69,12 +62,6 @@ function ensureTaskListener(): void {
 // ── Namespaced Static API ──────────────────────────────────────────
 
 export const Task = {
-  /**
-   * Spawn a one-shot task and return a ref for awaiting its result.
-   *
-   * @param fn - The async function to run in a new process.
-   * @returns A `TaskRef` with `pid`, `ref`, and `cancel()`.
-   */
   async_<T>(fn: () => Promise<T>): TaskRef<T> {
     ensureTaskListener();
 
@@ -85,12 +72,12 @@ export const Task = {
       resolve: null,
       reject: null,
       timer: null,
-      pid: "" as BeamPid,
+      pid: null,
     };
-    pendingTasks.set(ref, stored);
+    pendingTasks.set(taskKey(ref), stored);
 
     // Spawn the task process
-    Beam.spawn(async () => {
+    const spawnPid = (Beam.spawn as any)(async () => {
       try {
         const result = await fn();
         Beam.send(parentPid, { type: "task_result", ref, result });
@@ -102,46 +89,40 @@ export const Task = {
           stack: err instanceof Error ? err.stack : undefined,
         });
       }
-    }).then((spawnedPid) => {
-      stored.pid = spawnedPid;
-    });
+    }) as BeamPid;
+
+    stored.pid = spawnPid;
 
     return {
-      pid: stored.pid,
+      pid: spawnPid,
       ref,
       cancel(): void {
-        const e = pendingTasks.get(ref);
+        const e = pendingTasks.get(taskKey(ref));
         if (e) {
           if (e.timer) clearTimeout(e.timer);
-          if (e.pid) Beam.exitProcess(e.pid, "kill");
-          pendingTasks.delete(ref);
+          // Send shutdown to kill the task process
+          if (e.pid) {
+            Beam.send(e.pid, { type: "system", action: "shutdown", payload: "kill" });
+          }
+          pendingTasks.delete(taskKey(ref));
         }
       },
     };
   },
 
-  /**
-   * Await the result of a task started with `Task.async()`.
-   *
-   * @param ref - The `TaskRef` returned by `Task.async()`.
-   * @param timeout - Milliseconds to wait (default: 5000).
-   * @returns The task's return value.
-   * @throws BeamOtpError on timeout or if the task threw.
-   */
   await_<T>(ref: TaskRef<T>, timeout?: number): Promise<T> {
     const ms = timeout ?? 5000;
 
     return new Promise<T>((resolve, reject) => {
-      const entry = pendingTasks.get(ref.ref);
+      const entry = pendingTasks.get(taskKey(ref.ref));
       if (!entry) {
-        reject(BeamOtpError.notFound("task", ref.ref));
+        reject(BeamOtpError.notFound("task", String(ref.ref)));
         return;
       }
 
-      // Check if result already arrived
       if (entry.earlyResult) {
         const er = entry.earlyResult;
-        pendingTasks.delete(ref.ref);
+        pendingTasks.delete(taskKey(ref.ref));
         if (er.ok) {
           resolve(er.value);
         } else {
@@ -151,31 +132,27 @@ export const Task = {
       }
 
       entry.timer = setTimeout(() => {
-        pendingTasks.delete(ref.ref);
+        pendingTasks.delete(taskKey(ref.ref));
         reject(BeamOtpError.timeout(`Task.await for ref '${ref.ref}'`, ms));
-        if (entry.pid) Beam.exitProcess(entry.pid, "kill");
+        if (entry.pid) {
+          Beam.send(entry.pid, { type: "system", action: "shutdown", payload: "kill" });
+        }
       }, ms);
 
       entry.resolve = (result: any) => {
         if (entry.timer) clearTimeout(entry.timer);
-        pendingTasks.delete(ref.ref);
+        pendingTasks.delete(taskKey(ref.ref));
         resolve(result);
       };
       entry.reject = (err: Error) => {
         if (entry.timer) clearTimeout(entry.timer);
-        pendingTasks.delete(ref.ref);
+        pendingTasks.delete(taskKey(ref.ref));
         reject(err);
       };
     });
   },
 
-  /**
-   * Fire-and-forget: spawn a one-shot process and don't wait.
-   *
-   * @param fn - The function to run.
-   * @returns The PID of the spawned process.
-   */
   async start(fn: () => Promise<void>): Promise<BeamPid> {
-    return Beam.spawn(fn);
+    return (Beam.spawn as any)(fn) as Promise<BeamPid>;
   },
 };

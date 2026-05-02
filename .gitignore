@@ -3,3 +3,9 @@ dist/
 *.tsbuildinfo
 .env
 .env.local
+deps/
+_build/
+.agents/
+.pi/
+skills-lock.json
+mix.lock

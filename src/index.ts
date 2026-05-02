@@ -13,7 +13,6 @@ export {
 export type {
   BeamPid,
   BeamRef,
-  BeamMonitorRef,
   BeamAPI,
   BeamMessageHandler,
   BeamMonitorCallback,

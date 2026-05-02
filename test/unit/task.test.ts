@@ -60,7 +60,8 @@ describe("Task", () => {
       });
 
       expect(pid).toBeDefined();
-      expect(typeof pid).toBe("string");
+      expect(typeof pid).toBe("object");
+      expect((pid as any).__beam_type__).toBe("pid");
     });
   });
 

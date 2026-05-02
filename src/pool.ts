@@ -2,14 +2,13 @@
  * Pool — fixed-size worker pool with checkout/checkin.
  *
  * A Pool is backed by a Supervisor managing `size` identical GenServer
- * workers. Idle workers are queued; `checkout` borrows one, `checkin`
- * returns it. If a worker crashes while checked out, the supervisor
- * restarts it.
+ * workers. Uses Beam.spawn under the hood, compatible with both mock
+ * and real QuickBEAM environments.
  *
  * @module pool
  */
 
-import { Beam, BeamPid, BeamMonitorRef } from "./beam-shim.js";
+import { Beam, BeamPid, BeamRef } from "./beam-shim.js";
 import { BeamOtpError } from "./errors.js";
 import type { PoolConfig, PoolStatus } from "./types.js";
 import { Supervisor as SupervisorAPI } from "./supervisor.js";
@@ -17,25 +16,11 @@ import { Supervisor as SupervisorAPI } from "./supervisor.js";
 // ── Exported Pool interface ────────────────────────────────────────
 
 export interface Pool {
-  /** The pool supervisor's PID. */
   pid: BeamPid;
-
-  /** Borrow a worker. Blocks up to `timeout` ms (default: 5000). */
   checkout(timeout?: number): Promise<BeamPid>;
-
-  /** Return a worker to the pool. */
   checkin(pid: BeamPid): void;
-
-  /** Get pool status snapshot. */
   status(): PoolStatus;
-
-  /**
-   * Execute a transaction: checkout, run fn, checkin.
-   * Guarantees the worker is returned even if fn throws.
-   */
   transaction<T>(fn: (worker: BeamPid) => Promise<T>, timeout?: number): Promise<T>;
-
-  /** Shut down the pool and all workers. */
   shutdown(): Promise<void>;
 }
 
@@ -44,15 +29,12 @@ export interface Pool {
 interface PoolWorker {
   pid: BeamPid;
   inUse: boolean;
-  monitorRef: BeamMonitorRef;
+  monitorRef: BeamRef;
 }
 
 // ── Namespaced Static API ──────────────────────────────────────────
 
 export const Pool = {
-  /**
-   * Start a new worker pool.
-   */
   async start(config: PoolConfig): Promise<Pool> {
     const {
       name,
@@ -60,8 +42,8 @@ export const Pool = {
       child: ChildClass,
       childArgs,
       strategy = "fifo",
-      overflow:_overflow = 0,
-      max_overflow:_maxOverflow = 0,
+      overflow: _overflow = 0,
+      max_overflow: _maxOverflow = 0,
     } = config;
 
     const workers = new Map<string, PoolWorker>();
@@ -73,7 +55,6 @@ export const Pool = {
     }> = [];
     let shuttingDown = false;
 
-    // Build child specs
     const childSpecs = [];
     for (let i = 0; i < size; i++) {
       childSpecs.push({
@@ -90,7 +71,6 @@ export const Pool = {
       });
     }
 
-    // Start the backing supervisor
     const sup = await SupervisorAPI.start({
       strategy: "one_for_one",
       children: childSpecs,
@@ -98,12 +78,11 @@ export const Pool = {
       max_seconds: 5,
     });
 
-    // Populate workers from supervisor
     let idx = 0;
     for (const childInfo of sup.whichChildren()) {
       const workerId = childInfo.id;
-      const monRef = Beam.monitor(childInfo.pid, (_p, reason) => {
-        handleWorkerExit(workerId, reason);
+      const monRef = Beam.monitor(childInfo.pid, (_reason: any) => {
+        handleWorkerExit(workerId, _reason);
       });
       workers.set(workerId, {
         pid: childInfo.pid,
@@ -160,14 +139,14 @@ export const Pool = {
 
       checkin(pid: BeamPid): void {
         for (const [workerId, worker] of workers) {
-          if (worker.pid === pid && worker.inUse) {
+          if (pidsEqual(worker.pid, pid) && worker.inUse) {
             worker.inUse = false;
             idleQueue.push(workerId);
             processQueue();
             return;
           }
         }
-        console.warn(`[Pool] checkin: worker ${pid} not found or already idle`);
+        console.warn(`[Pool] checkin: worker not found or already idle`);
       },
 
       status(): PoolStatus {
@@ -205,3 +184,8 @@ export const Pool = {
     return pool;
   },
 };
+
+function pidsEqual(a: BeamPid, b: BeamPid): boolean {
+  return (a as any).__beam_type__ === "pid" && (b as any).__beam_type__ === "pid"
+    && ((a as any).id === (b as any).id || (a as any).__beam_data__ === (b as any).__beam_data__);
+}

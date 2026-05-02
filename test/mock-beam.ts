@@ -1,9 +1,15 @@
 /**
  * Mock Beam API for unit testing quickbeam-js modules.
  *
- * Simulates a QuickBEAM runtime in pure JS. All processes run in the
- * same thread, messages are dispatched via an event bus. Process context
- * is properly switched when delivering messages to different PIDs.
+ * Accurately simulates QuickBEAM's real API:
+ * - PIDs are opaque objects (not strings)
+ * - Refs are opaque objects
+ * - spawn() takes a script string, not a function
+ * - register() takes only a name (registers self)
+ * - monitor() callback receives only exit reason (not pid)
+ * - No exit()/exitProcess() — processes exit by throwing
+ *
+ * For convenience in tests, provide spawnFn() that wraps spawn + eval.
  *
  * @module test/mock-beam
  */
@@ -13,7 +19,6 @@ import type {
   BeamAPI,
   BeamPid,
   BeamRef,
-  BeamMonitorRef,
   BeamMessageHandler,
   BeamMonitorCallback,
 } from "../src/beam-shim.js";
@@ -22,7 +27,14 @@ import type {
 
 let pidCounter = 1;
 let refCounter = 1;
-let monitorRefCounter = 1;
+
+function makePid(): BeamPid {
+  return { __beam_type__: "pid", id: pidCounter++ } as unknown as BeamPid;
+}
+
+function makeRef(): BeamRef {
+  return { __beam_type__: "ref", id: refCounter++ } as unknown as BeamRef;
+}
 
 /** Map<pid, { handler, inbox }> */
 const processes = new Map<
@@ -36,9 +48,9 @@ const processes = new Map<
 /** Map<name, pid> for registered processes. */
 const registry = new Map<string, BeamPid>();
 
-/** Map<monitorRef, { targetPid, callback }> */
+/** Map<ref, { targetPid, callback }> */
 const monitors = new Map<
-  BeamMonitorRef,
+  BeamRef,
   {
     targetPid: BeamPid;
     callback: BeamMonitorCallback;
@@ -50,40 +62,47 @@ let currentPid: BeamPid = makePid();
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-function makePid(): BeamPid {
-  return `<0.${pidCounter++}.0>`;
+function pidKey(pid: BeamPid): string {
+  return (pid as any).__beam_type__ + ":" + (pid as any).id;
 }
 
-function makeRef(): BeamRef {
-  return `#Ref<0.${refCounter++}>`;
+function isPidLike(obj: any): obj is BeamPid {
+  return obj && typeof obj === "object" && obj.__beam_type__ === "pid";
 }
 
-function makeMonitorRef(): BeamMonitorRef {
-  return `#Monitor<0.${monitorRefCounter++}>`;
+function pidEquals(a: BeamPid, b: BeamPid): boolean {
+  return pidKey(a) === pidKey(b);
 }
 
 function deliverMessage(pid: BeamPid, msg: any): void {
   const proc = processes.get(pid);
-  if (!proc) return; // process doesn't exist — drop (BEAM behaviour)
+  if (!proc) return; // process doesn't exist — drop
 
   // Check global reply handlers first (used by GenServer.call)
   if (msg && msg.type === "reply" && msg.ref) {
     const replyHandlers = (globalThis as any).__quickbeam_js_reply_handlers as Map<string, (reply: any) => void> | undefined;
-    if (replyHandlers?.has(msg.ref)) {
-      const handler = replyHandlers.get(msg.ref)!;
-      handler(msg);
-      return;
+    if (replyHandlers) {
+      const key = pidKey(msg.ref);
+      if (replyHandlers.has(key)) {
+        const handler = replyHandlers.get(key)!;
+        handler(msg);
+        return;
+      }
     }
   }
 
   if (proc.handler) {
-    // Switch process context before running handler
     const prevPid = currentPid;
     currentPid = pid;
     try {
-      proc.handler(msg);
+      const result = proc.handler(msg);
+      // If the handler returns a Promise that rejects, treat it as exit
+      if (result && typeof (result as any).catch === "function") {
+        (result as Promise<any>).catch((err: any) => {
+          handleProcessExit(pid, err);
+        });
+      }
     } catch (err) {
-      // Handler threw — treat as process exit
       handleProcessExit(pid, err);
     } finally {
       currentPid = prevPid;
@@ -94,10 +113,10 @@ function deliverMessage(pid: BeamPid, msg: any): void {
 }
 
 function handleProcessExit(pid: BeamPid, reason: any): void {
-  // Clean up registrations FIRST so monitor callbacks (restarts) see clean state
+  // Clean up registrations FIRST
   const namesToDelete: string[] = [];
   for (const [name, registeredPid] of registry) {
-    if (registeredPid === pid) namesToDelete.push(name);
+    if (pidEquals(registeredPid, pid)) namesToDelete.push(name);
   }
   for (const name of namesToDelete) {
     registry.delete(name);
@@ -108,19 +127,18 @@ function handleProcessExit(pid: BeamPid, reason: any): void {
     proc.handler = null;
   }
 
-  // Fire monitors (after cleanup — this enables safe restarts)
-  const toFire: Array<{ pid: BeamPid; reason: any; callback: BeamMonitorCallback }> = [];
+  // Fire monitors (after cleanup)
+  const toFire: Array<{ reason: any; callback: BeamMonitorCallback }> = [];
   for (const [monRef, mon] of monitors) {
-    if (mon.targetPid === pid) {
-      toFire.push({ pid, reason, callback: mon.callback });
+    if (pidEquals(mon.targetPid, pid)) {
+      toFire.push({ reason, callback: mon.callback });
       monitors.delete(monRef);
     }
   }
-  // Fire monitor callbacks
   const prevPid = currentPid;
-  for (const { pid: deadPid, reason: exitReason, callback } of toFire) {
+  for (const { reason: exitReason, callback } of toFire) {
     try {
-      callback(deadPid, exitReason);
+      callback(exitReason);
     } catch (_) {
       // Monitor callback errors are swallowed
     }
@@ -128,127 +146,139 @@ function handleProcessExit(pid: BeamPid, reason: any): void {
   currentPid = prevPid;
 }
 
+/** Evaluate a script string in the current process context. */
+function evalScript(script: string): any {
+  const fn = new Function("Beam", script);
+  return fn(getBeam());
+}
+
 // ── Mock Beam API ──────────────────────────────────────────────────
 
-const mockBeam: BeamAPI = {
-  async spawn(fn: () => Promise<void> | void): Promise<BeamPid> {
-    const pid = makePid();
-    processes.set(pid, { handler: null, inbox: [] });
+let beamFn: BeamAPI;
 
-    // Run fn in the new process's context
-    const prevPid = currentPid;
-    currentPid = pid;
-    try {
-      await fn();
-    } catch (err) {
-      handleProcessExit(pid, err);
-    } finally {
-      currentPid = prevPid;
-    }
-    return pid;
-  },
+function getBeam(): BeamAPI {
+  if (!beamFn) beamFn = buildMockBeam();
+  return beamFn;
+}
 
-  self(): BeamPid {
-    return currentPid;
-  },
+function buildMockBeam(): BeamAPI {
+  return {
+    async call(_handler: string, ..._args: unknown[]): Promise<unknown> {
+      return undefined;
+    },
 
-  send(pid: BeamPid, message: any): void {
-    deliverMessage(pid, message);
-  },
+    callSync(_handler: string, ..._args: unknown[]): unknown {
+      return undefined;
+    },
 
-  onMessage(handler: BeamMessageHandler): void {
-    const pid = currentPid;
-    const proc = processes.get(pid);
-    if (!proc) {
-      processes.set(pid, { handler, inbox: [] });
-    } else {
-      proc.handler = handler;
-      // Drain any queued messages
-      while (proc.inbox.length > 0) {
-        const msg = proc.inbox.shift()!;
-        handler(msg);
-      }
-    }
-  },
+    send(pid: BeamPid, message: unknown): void {
+      deliverMessage(pid, message);
+    },
 
-  register(name: string, pid: BeamPid): void {
-    registry.set(name, pid);
-  },
+    self(): BeamPid {
+      return currentPid;
+    },
 
-  whereis(name: string): BeamPid | undefined {
-    return registry.get(name);
-  },
-
-  unregister(name: string): void {
-    registry.delete(name);
-  },
-
-  monitor(pid: BeamPid, cb: BeamMonitorCallback): BeamMonitorRef {
-    const ref = makeMonitorRef();
-    monitors.set(ref, { targetPid: pid, callback: cb });
-    return ref;
-  },
-
-  demonitor(ref: BeamMonitorRef): void {
-    monitors.delete(ref);
-  },
-
-  link(_pid: BeamPid): void {
-    // no-op in mock
-  },
-
-  unlink(_pid: BeamPid): void {
-    // no-op
-  },
-
-  makeRef(): BeamRef {
-    return makeRef();
-  },
-
-  exit(reason: any): void {
-    handleProcessExit(currentPid, reason);
-  },
-
-  exitProcess(pid: BeamPid, reason: any): void {
-    handleProcessExit(pid, reason);
-  },
-
-  nodes(): string[] {
-    return [];
-  },
-
-  callSync(target: string | BeamPid, message: any, _timeout?: number): any {
-    const pid = typeof target === "string" ? registry.get(target) : target;
-    if (pid) deliverMessage(pid, message);
-    return undefined;
-  },
-
-  async call(target: string | BeamPid, message: any, _timeout?: number): Promise<any> {
-    const pid = typeof target === "string" ? registry.get(target) : target;
-    if (pid) deliverMessage(pid, message);
-    return undefined;
-  },
-
-  async sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  },
-
-  async eval(target: BeamPid, code: string | ((scope: any) => void | Promise<void>), scope?: any): Promise<void> {
-    const prevPid = currentPid;
-    currentPid = target;
-    try {
-      if (typeof code === "function") {
-        await (code as (scope: any) => void | Promise<void>)(scope);
+    onMessage(handler: BeamMessageHandler): void {
+      const pid = currentPid;
+      const proc = processes.get(pid);
+      if (!proc) {
+        processes.set(pid, { handler, inbox: [] });
       } else {
-        // String code — evaluate in a function with scope as parameter
-        const fn = new Function("scope", code);
-        fn(scope);
+        proc.handler = handler;
+        while (proc.inbox.length > 0) {
+          const msg = proc.inbox.shift()!;
+          handler(msg);
+        }
       }
-    } finally {
-      currentPid = prevPid;
-    }
-  },
-};
+    },
+
+    monitor(pid: BeamPid, cb: BeamMonitorCallback): BeamRef {
+      const ref = makeRef();
+      monitors.set(ref, { targetPid: pid, callback: cb });
+      return ref;
+    },
+
+    demonitor(ref: BeamRef): void {
+      monitors.delete(ref);
+    },
+
+    sleep(ms: number): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    },
+
+    /**
+     * Spawn a new process by evaluating a script string.
+     * The script runs in the new process's context with `Beam` available.
+     */
+    /**
+     * Spawn a new process. Accepts a script string (real QuickBEAM API)
+     * OR a function (mock convenience for GenServer.startLink).
+     */
+    spawn(script: string | ((() => Promise<void> | void))): BeamPid {
+      if (typeof script === "function") {
+        // Mock convenience: spawn with closure
+        const pid = makePid();
+        processes.set(pid, { handler: null, inbox: [] });
+        const prevPid = currentPid;
+        currentPid = pid;
+        const fn = script;
+        (async () => {
+          try {
+            await fn();
+          } catch (err) {
+            handleProcessExit(pid, err);
+          } finally {
+            currentPid = prevPid;
+          }
+        })();
+        return pid;
+      }
+      // Script string (real QuickBEAM API)
+      const pid = makePid();
+      processes.set(pid, { handler: null, inbox: [] });
+      const prevPid = currentPid;
+      currentPid = pid;
+      try {
+        evalScript(script);
+      } catch (err) {
+        handleProcessExit(pid, err);
+      } finally {
+        currentPid = prevPid;
+      }
+      return pid;
+    },
+
+    // Internal: spawn with a function (for mock testing only, not part of real API)
+    _spawnFn: (undefined as any),
+
+    register(name: string): boolean {
+      if (registry.has(name)) return false;
+      registry.set(name, currentPid);
+      return true;
+    },
+
+    whereis(name: string): BeamPid | null {
+      return registry.get(name) ?? null;
+    },
+
+    link(_pid: BeamPid): boolean {
+      return true;
+    },
+
+    unlink(_pid: BeamPid): boolean {
+      return true;
+    },
+
+    makeRef(): BeamRef {
+      return makeRef();
+    },
+
+    nodes(): string[] {
+      return [];
+    },
+  };
+}
 
 // ── Test helpers ───────────────────────────────────────────────────
 
@@ -258,15 +288,19 @@ const mockBeam: BeamAPI = {
 export function setupMockBeam(): void {
   pidCounter = 1;
   refCounter = 1;
-  monitorRefCounter = 1;
   processes.clear();
   registry.clear();
   monitors.clear();
-  currentPid = `<0.${pidCounter++}.0>`;
+  currentPid = makePid();
   processes.set(currentPid, { handler: null, inbox: [] });
-  setMockBeam(mockBeam);
+  setMockBeam(buildMockBeam());
+  beamFn = null;
 
-  // Reset module-level state in task.ts
+  // Mock marker for gen-server.ts detection
+  (globalThis as any).__quickbeam_mock = true;
+  // Provide QuickbeamJs stub for spawned script evaluation
+  (globalThis as any).QuickbeamJs = (globalThis as any).QuickbeamJs ?? {};
+
   (globalThis as any).__quickbeam_js_task_listener_setup = false;
   (globalThis as any).__quickbeam_js_reply_handlers = undefined;
 }
@@ -293,8 +327,35 @@ export function crashMockProcess(pid: BeamPid, reason?: any): void {
 }
 
 /**
- * Get a snapshot of all registered names (for debugging).
+ * Get a snapshot of all registered names.
  */
 export function getMockRegistry(): Map<string, BeamPid> {
   return new Map(registry);
+}
+
+/**
+ * Convenience: spawn a process with a function instead of a script.
+ * Internally wraps the function in a script that evaluates it.
+ * NOT part of the real Beam API — only for tests.
+ */
+export async function spawnMockFn(fn: () => Promise<void> | void): Promise<BeamPid> {
+  const pid = makePid();
+  processes.set(pid, { handler: null, inbox: [] });
+  const prevPid = currentPid;
+  currentPid = pid;
+  try {
+    await fn();
+  } catch (err) {
+    handleProcessExit(pid, err);
+  } finally {
+    currentPid = prevPid;
+  }
+  return pid;
+}
+
+/**
+ * Check if two PIDs are equal (for tests).
+ */
+export function pidsEqual(a: BeamPid, b: BeamPid): boolean {
+  return pidEquals(a, b);
 }

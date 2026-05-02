@@ -4,7 +4,7 @@
  * @module types
  */
 
-import type { BeamPid, BeamRef, BeamMonitorRef } from "./beam-shim.js";
+import type { BeamPid, BeamRef } from "./beam-shim.js";
 
 // ── Supervisor ─────────────────────────────────────────────────────
 
@@ -157,7 +157,7 @@ export interface AppConfig {
 export interface ChildState {
   spec: ChildSpec;
   pid: BeamPid | null;
-  monitorRef: BeamMonitorRef | null;
+  monitorRef: BeamRef | null;
   restarts: number;
   startTime: number;
 }
