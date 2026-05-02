@@ -2,6 +2,15 @@
   "name": "quickbeam-js",
   "version": "0.1.0",
   "description": "OTP patterns in JavaScript, on the BEAM — Supervisors, GenServers, Registries, Pools, Tasks, and Applications built on QuickBEAM primitives.",
+  "author": "monotykamary",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monotykamary/quickbeam-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/monotykamary/quickbeam-js/issues"
+  },
+  "homepage": "https://github.com/monotykamary/quickbeam-js#readme",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
