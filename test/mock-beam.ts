@@ -232,6 +232,22 @@ const mockBeam: BeamAPI = {
   async sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   },
+
+  async eval(target: BeamPid, code: string | ((scope: any) => void | Promise<void>), scope?: any): Promise<void> {
+    const prevPid = currentPid;
+    currentPid = target;
+    try {
+      if (typeof code === "function") {
+        await (code as (scope: any) => void | Promise<void>)(scope);
+      } else {
+        // String code — evaluate in a function with scope as parameter
+        const fn = new Function("scope", code);
+        fn(scope);
+      }
+    } finally {
+      currentPid = prevPid;
+    }
+  },
 };
 
 // ── Test helpers ───────────────────────────────────────────────────

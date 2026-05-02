@@ -56,6 +56,75 @@ mix deps.get   # {:quickbeam, "~> 0.7"}
 npm install quickbeam-js
 ```
 
+## Low-level Beam primitives
+
+quickbeam-js re-exports QuickBEAM's full `Beam.*` API. Use these directly when
+you need fine-grained control — no OTP wrappers required.
+
+```javascript
+import { Beam } from "quickbeam-js";
+
+// ── Process identity ──────────────────────────────────────────────
+const self = Beam.self();
+console.log("My PID:", self); // <0.123.0>
+
+// ── Fire-and-forget messaging ─────────────────────────────────────
+Beam.send(somePid, { type: "tick", payload: 42 });
+
+// ── Receive messages (one handler per process) ────────────────────
+Beam.onMessage((msg) => {
+  console.log("got:", msg);
+});
+
+// ── Spawn a new process ───────────────────────────────────────────
+const pid = await Beam.spawn(async () => {
+  Beam.onMessage((msg) => console.log("child got:", msg));
+  await Beam.sleep(1000);
+});
+
+// ── Monitor (get notified when a process exits) ───────────────────
+const ref = Beam.monitor(pid, (exitedPid, reason) => {
+  console.log(`process ${exitedPid} died:`, reason);
+});
+Beam.demonitor(ref); // cancel
+
+// ── Name registration ─────────────────────────────────────────────
+Beam.register("logger", Beam.self());
+const loggerPid = Beam.whereis("logger");
+Beam.unregister("logger");
+
+// ── Links (bidirectional crash propagation) ───────────────────────
+Beam.link(pid);    // if pid crashes, I crash too
+Beam.unlink(pid);
+
+// ── Exit signals ──────────────────────────────────────────────────
+Beam.exitProcess(pid, "shutdown");
+Beam.exit("normal"); // exit myself
+
+// ── Cluster nodes ─────────────────────────────────────────────────
+const nodes = Beam.nodes(); // [:"app@host"]
+const result = await Beam.call("service@other", { type: "ping" });
+
+// ── Transport closures across processes ───────────────────────────
+// Beam.eval runs code or a closure in the context of a target process.
+// This is how you inject behavior into another runtime at runtime.
+const shared = { value: 0, name: "shared" };
+await Beam.eval(childPid, (scope) => {
+  scope.value = 42;
+  Beam.onMessage((msg) => console.log("child received:", msg));
+}, shared);
+// `shared.value` is now 42 inside the child process
+
+// Or pass the scope object directly (QuickBEAM serializes/transports it)
+await Beam.eval(childPid, (scope) => {
+  console.log("Booted with config:", scope.config);
+  scope.onReady();
+}, { config: { port: 8080 }, onReady: () => console.log("ready") });
+```
+
+All these primitives work both in production (against QuickBEAM's real
+`globalThis.Beam`) and in unit tests (against the mock Beam).
+
 ## Quick start
 
 ```javascript

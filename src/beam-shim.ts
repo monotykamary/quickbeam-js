@@ -90,6 +90,10 @@ export interface BeamAPI {
   /** Asynchronous RPC to a named process. */
   call(target: string | BeamPid, message: any, timeout?: number): Promise<any>;
 
+  /** Evaluate JavaScript code (or a closure) in the context of a target process.
+   *  Allows transporting closures and scope across processes. */
+  eval(target: BeamPid, code: string | ((scope: any) => void | Promise<void>), scope?: any): Promise<void>;
+
   /** Sleep for `ms` milliseconds (non-blocking in BEAM terms). */
   sleep(ms: number): Promise<void>;
 }
@@ -141,5 +145,6 @@ export const Beam = {
   get nodes() { return getBeam().nodes.bind(getBeam()); },
   get callSync() { return getBeam().callSync.bind(getBeam()); },
   get call() { return getBeam().call.bind(getBeam()); },
+  get eval() { return getBeam().eval.bind(getBeam()); },
   get sleep() { return getBeam().sleep.bind(getBeam()); },
 };
