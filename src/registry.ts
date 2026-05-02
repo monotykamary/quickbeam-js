@@ -82,7 +82,7 @@ export const Registry = {
         if (keysMode === "unique") {
           if (entries.has(key)) {
             Beam.demonitor(monRef);
-            throw new BeamOtpError("already_started", `Key '${key}' is already registered`);
+            throw new BeamOtpError("BeamOtpError:already_started", `Key '${key}' is already registered`);
           }
           entries.set(key, entry);
         } else {
@@ -163,7 +163,7 @@ export const Registry = {
         if (state.keysMode === "unique") {
           if (state.entries.has(key)) {
             Beam.demonitor(monRef);
-            throw new BeamOtpError("already_started", `Key '${key}' is already registered`);
+            throw new BeamOtpError("BeamOtpError:already_started", `Key '${key}' is already registered`);
           }
           state.entries.set(key, entry);
         } else {

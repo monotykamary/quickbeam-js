@@ -285,7 +285,7 @@ async function createSupervisor(config: SupervisorConfig): Promise<SupervisorInt
     async _addChild(spec: ChildSpec): Promise<BeamPid> {
       if (shuttingDown) throw BeamOtpError.shutdown();
       if (children.has(spec.id)) {
-        throw new BeamOtpError("already_started", `Child '${spec.id}' already exists`);
+        throw new BeamOtpError("BeamOtpError:already_started", `Child '${spec.id}' already exists`);
       }
       const childPid = await startChildInternal(spec);
       startOrder.push(spec.id);

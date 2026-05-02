@@ -76,7 +76,7 @@ export async function withTimeout<T>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new BeamOtpError("timeout", `${label} timed out after ${timeoutMs}ms`));
+      reject(new BeamOtpError("BeamOtpError:timeout", `${label} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
     fn()

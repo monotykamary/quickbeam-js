@@ -20,8 +20,8 @@ export type {
 } from "./beam-shim.js";
 
 // ── Errors ─────────────────────────────────────────────────────────
-export { BeamOtpError } from "./errors.js";
-export type { BeamOtpErrorCode } from "./errors.js";
+export { BeamOtpError, findCause } from "./errors.js";
+export type { BeamOtpErrorTag, BeamOtpErrorCode } from "./errors.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 export type {

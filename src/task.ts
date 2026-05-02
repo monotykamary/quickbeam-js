@@ -56,7 +56,7 @@ function ensureTaskListener(): void {
         if (entry.reject) {
           pendingTasks.delete(msg.ref);
           entry.reject(
-            new BeamOtpError("exit", `Task failed: ${msg.error}`, msg.stack),
+            new BeamOtpError("BeamOtpError:exit", `Task failed: ${msg.error}`, { reason: msg.stack }),
           );
         } else {
           entry.earlyResult = { ok: false, error: msg.error, stack: msg.stack };
@@ -145,7 +145,7 @@ export const Task = {
         if (er.ok) {
           resolve(er.value);
         } else {
-          reject(new BeamOtpError("exit", `Task failed: ${er.error}`, er.stack));
+          reject(new BeamOtpError("BeamOtpError:exit", `Task failed: ${er.error}`, { reason: er.stack }));
         }
         return;
       }
