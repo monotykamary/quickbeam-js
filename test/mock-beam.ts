@@ -1,5 +1,5 @@
 /**
- * Mock Beam API for unit testing beam-otp modules.
+ * Mock Beam API for unit testing quickbeam-js modules.
  *
  * Simulates a QuickBEAM runtime in pure JS. All processes run in the
  * same thread, messages are dispatched via an event bus. Process context
@@ -68,7 +68,7 @@ function deliverMessage(pid: BeamPid, msg: any): void {
 
   // Check global reply handlers first (used by GenServer.call)
   if (msg && msg.type === "reply" && msg.ref) {
-    const replyHandlers = (globalThis as any).__beam_otp_reply_handlers as Map<string, (reply: any) => void> | undefined;
+    const replyHandlers = (globalThis as any).__quickbeam_js_reply_handlers as Map<string, (reply: any) => void> | undefined;
     if (replyHandlers?.has(msg.ref)) {
       const handler = replyHandlers.get(msg.ref)!;
       handler(msg);
@@ -251,8 +251,8 @@ export function setupMockBeam(): void {
   setMockBeam(mockBeam);
 
   // Reset module-level state in task.ts
-  (globalThis as any).__beam_otp_task_listener_setup = false;
-  (globalThis as any).__beam_otp_reply_handlers = undefined;
+  (globalThis as any).__quickbeam_js_task_listener_setup = false;
+  (globalThis as any).__quickbeam_js_reply_handlers = undefined;
 }
 
 /**

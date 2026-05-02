@@ -332,7 +332,7 @@ The top-level entry point. Called from `app.js` (the script the Elixir bootstrap
 
 ```javascript
 // priv/js/app.js
-import { Application } from "beam-otp";
+import { Application } from "quickbeam-js";
 
 Application.start({
   id: "my_app",
@@ -373,7 +373,7 @@ class BeamOtpError extends Error {
 
 ## Message Protocol
 
-beam-otp uses a convention over `Beam.send`/`Beam.onMessage`:
+quickbeam-js uses a convention over `Beam.send`/`Beam.onMessage`:
 
 ```typescript
 // GenServer call
@@ -395,4 +395,4 @@ beam-otp uses a convention over `Beam.send`/`Beam.onMessage`:
 { type: "exit", pid: BeamPid, reason: any }
 ```
 
-All beam-otp messages are tagged with `type`. User-defined messages sent via `Beam.send` directly (bypassing GenServer) are received in `handleInfo`.
+All quickbeam-js messages are tagged with `type`. User-defined messages sent via `Beam.send` directly (bypassing GenServer) are received in `handleInfo`.

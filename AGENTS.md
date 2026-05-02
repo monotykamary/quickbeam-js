@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This file provides guidance to coding agents working with the beam-otp repository.
+This file provides guidance to coding agents working with the quickbeam-js repository.
 
 ## Project Overview
 
-beam-otp is a JavaScript-first orchestration layer for QuickBEAM. It provides OTP patterns — supervisors, workers, pools, registries, messaging — expressed as JavaScript APIs, so developers manage JS runtimes from JS instead of writing Elixir supervision trees.
+quickbeam-js is a JavaScript-first orchestration layer for QuickBEAM. It provides OTP patterns — supervisors, workers, pools, registries, messaging — expressed as JavaScript APIs, so developers manage JS runtimes from JS instead of writing Elixir supervision trees.
 
 The only Elixir required is a single bootstrap line. Everything else is JS.
 
@@ -18,9 +18,9 @@ The only Elixir required is a single bootstrap line. Everything else is JS.
 
 ## QuickBEAM Dependency
 
-beam-otp depends on [QuickBEAM](https://github.com/elixir-volt/quickbeam) (Hex: `quickbeam`). It does **not** embed or fork QuickBEAM. It is a pure JS library that uses QuickBEAM's existing `Beam.*` API as its foundation and adds higher-level orchestration abstractions on top.
+quickbeam-js depends on [QuickBEAM](https://github.com/elixir-volt/quickbeam) (Hex: `quickbeam`). It does **not** embed or fork QuickBEAM. It is a pure JS library that uses QuickBEAM's existing `Beam.*` API as its foundation and adds higher-level orchestration abstractions on top.
 
-Read the QuickBEAM README thoroughly before implementing — beam-otp wraps and extends these primitives:
+Read the QuickBEAM README thoroughly before implementing — quickbeam-js wraps and extends these primitives:
 - `Beam.spawn` → `Supervisor.startChild`
 - `Beam.monitor` / `Beam.demonitor` → `Supervisor` crash recovery
 - `Beam.link` / `Beam.unlink` → `Supervisor` crash propagation
@@ -66,8 +66,8 @@ mix ci                # QuickBEAM's full quality gate (format, credo, dialyzer, 
 
 ## Architecture Constraints
 
-1. **One Elixir line bootstrap** — The only Elixir is the supervisor child spec that starts the root QuickBEAM runtime with `beam-otp`'s entry script.
-2. **No Elixir genserver modules** — beam-otp does not ship Elixir modules. All orchestration is JS.
+1. **One Elixir line bootstrap** — The only Elixir is the supervisor child spec that starts the root QuickBEAM runtime with `quickbeam-js`'s entry script.
+2. **No Elixir genserver modules** — quickbeam-js does not ship Elixir modules. All orchestration is JS.
 3. **Crash recovery via Beam.monitor** — Supervisors detect child exits through monitors, not Elixir `:EXIT` messages.
 4. **Stateless supervisor strategies** — Supervisor state (child specs, restart counts) lives in JS closures, not in ETS or Elixir processes.
 5. **Registry backed by Beam.register** — Name registration delegates to QuickBEAM's existing `Beam.register`/`Beam.whereis`.

@@ -1,6 +1,6 @@
 # Cookbook
 
-Common patterns implemented with beam-otp.
+Common patterns implemented with quickbeam-js.
 
 ---
 
@@ -9,7 +9,7 @@ Common patterns implemented with beam-otp.
 Server-side rendering using QuickBEAM's built-in DOM (lexbor) + a pool of renderer workers.
 
 ```javascript
-import { GenServer, Pool, Supervisor, Application } from "beam-otp";
+import { GenServer, Pool, Supervisor, Application } from "quickbeam-js";
 
 class Renderer extends GenServer {
   async init() {
@@ -58,7 +58,7 @@ const html = await pool.transaction(async (worker) => {
 Each LiveView gets a lightweight JS context from a shared pool. The context runs user-specific logic (form validation, computed fields) and calls back to Elixir for persistence.
 
 ```javascript
-import { GenServer, Pool, Registry } from "beam-otp";
+import { GenServer, Pool, Registry } from "quickbeam-js";
 
 class SessionLogic extends GenServer {
   async init({ userId }) {
@@ -93,7 +93,7 @@ def mount(_params, _session, socket) do
     handlers: %{"cart.update" => fn [user_id, cart] -> Cart.save(user_id, cart) end}
   )
   QuickBEAM.Context.eval(ctx, """
-    import { SessionLogic } from "beam-otp";
+    import { SessionLogic } from "quickbeam-js";
     SessionLogic.startLink({ name: "session_#{pane_id}", args: { userId: "#{user_id}" } });
   """)
   {:ok, assign(socket, js: ctx)}
@@ -107,7 +107,7 @@ end
 User-defined business rules (pricing, validation, transforms) in sandboxed JS runtimes with `apis: false`, memory limits, and timeouts.
 
 ```javascript
-import { GenServer, Pool } from "beam-otp";
+import { GenServer, Pool } from "quickbeam-js";
 
 class RuleWorker extends GenServer {
   async init() {
@@ -152,7 +152,7 @@ Corresponding Elixir bootstrap sets memory limits:
 ```elixir
 children = [
   {QuickBEAM.ContextPool, name: :rule_pool, size: 2, memory_limit: 512_000, max_reductions: 100_000},
-  {QuickBEAM, name: :beam_otp_root, script: "priv/js/app.js"},
+  {QuickBEAM, name: :quickbeam_js_root, script: "priv/js/app.js"},
 ]
 ```
 
@@ -163,7 +163,7 @@ children = [
 Each chat room is a supervised GenServer. Join/leave/broadcast use the Registry.
 
 ```javascript
-import { GenServer, Supervisor, Registry, Application } from "beam-otp";
+import { GenServer, Supervisor, Registry, Application } from "quickbeam-js";
 
 class Room extends GenServer {
   async init({ roomId }) {
@@ -221,10 +221,10 @@ await sup.startChild({
 
 ## 5. Multi-Node Distributed Workers
 
-QuickBEAM supports `Beam.nodes()` and `Beam.rpc()`. beam-otp can dispatch work across BEAM cluster nodes:
+QuickBEAM supports `Beam.nodes()` and `Beam.rpc()`. quickbeam-js can dispatch work across BEAM cluster nodes:
 
 ```javascript
-import { GenServer, Pool, Task } from "beam-otp";
+import { GenServer, Pool, Task } from "quickbeam-js";
 
 class DistributedPool {
   constructor(pools) {

@@ -1,5 +1,5 @@
 /**
- * Structured error hierarchy for beam-otp — following the errore pattern:
+ * Structured error hierarchy for quickbeam-js — following the errore pattern:
  *
  * - Errors-as-values returned as union types (`T | BeamOtpError`)
  * - `_tag` property for type-level discrimination
@@ -32,7 +32,7 @@ export type BeamOtpErrorTag =
   | "BeamOtpError:restart_limit";
 
 /**
- * Structured error thrown by all beam-otp operations.
+ * Structured error thrown by all quickbeam-js operations.
  *
  * Follows the errore pattern:
  * - **`_tag`** — string literal for type narrowing (primary discriminant)
@@ -70,7 +70,7 @@ export class BeamOtpError extends Error {
   public readonly reason?: any;
 
   /**
-   * Create a new beam-otp error.
+   * Create a new quickbeam-js error.
    *
    * @param tag - Discriminant tag for narrowing.
    * @param message - Human-readable message.
@@ -225,7 +225,7 @@ export class BeamOtpError extends Error {
  *
  * @example
  * ```ts
- * import { findCause } from "beam-otp/errors";
+ * import { findCause } from "quickbeam-js";
  * const dbErr = findCause(wrapped, DbError);
  * ```
  */

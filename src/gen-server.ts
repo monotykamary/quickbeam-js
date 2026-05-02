@@ -162,8 +162,8 @@ export abstract class GenServer {
       }, ms);
 
       // Register a one-shot handler for the reply
-      const prevHandler = (globalThis as any).__beam_otp_reply_handlers ?? new Map();
-      (globalThis as any).__beam_otp_reply_handlers = prevHandler;
+      const prevHandler = (globalThis as any).__quickbeam_js_reply_handlers ?? new Map();
+      (globalThis as any).__quickbeam_js_reply_handlers = prevHandler;
 
       prevHandler.set(ref, (reply: GenReplyMessage) => {
         clearTimeout(timer);

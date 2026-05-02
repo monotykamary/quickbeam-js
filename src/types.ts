@@ -1,5 +1,5 @@
 /**
- * Shared types for beam-otp.
+ * Shared types for quickbeam-js.
  *
  * @module types
  */

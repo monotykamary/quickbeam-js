@@ -1,5 +1,5 @@
 /**
- * Utility helpers for beam-otp.
+ * Utility helpers for quickbeam-js.
  *
  * @module utils
  */

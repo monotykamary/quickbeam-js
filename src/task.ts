@@ -30,8 +30,8 @@ const pendingTasks = new Map<BeamRef, PendingTask>();
 
 function ensureTaskListener(): void {
   // Check global flag (resettable by mock setup)
-  if ((globalThis as any).__beam_otp_task_listener_setup) return;
-  (globalThis as any).__beam_otp_task_listener_setup = true;
+  if ((globalThis as any).__quickbeam_js_task_listener_setup) return;
+  (globalThis as any).__quickbeam_js_task_listener_setup = true;
 
   Beam.onMessage((msg: any) => {
     if (!msg || typeof msg !== "object") return;

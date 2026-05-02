@@ -1,5 +1,5 @@
 {
-  "name": "beam-otp",
+  "name": "quickbeam-js",
   "version": "0.1.0",
   "description": "OTP patterns in JavaScript, on the BEAM — Supervisors, GenServers, Registries, Pools, Tasks, and Applications built on QuickBEAM primitives.",
   "type": "module",

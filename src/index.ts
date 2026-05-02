@@ -1,7 +1,7 @@
 /**
- * beam-otp — OTP patterns in JavaScript, on the BEAM.
+ * quickbeam-js ��� OTP patterns in JavaScript, on the BEAM.
  *
- * @module beam-otp
+ * @module quickbeam-js
  */
 
 // ── Beam primitives (re-export for convenience) ────────────────────

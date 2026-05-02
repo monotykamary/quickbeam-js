@@ -36,11 +36,11 @@ QuickBEAM's `Beam.*` API already exposes everything needed:
 - `Beam.call` / `Beam.callSync` — synchronous RPC
 - `Beam.register` / `Beam.whereis` — name registration
 
-beam-otp takes these low-level primitives and builds the same patterns Elixir uses: Supervisor, GenServer, Registry, Pool, Task, Application. The patterns are identical; the language is JS.
+quickbeam-js takes these low-level primitives and builds the same patterns Elixir uses: Supervisor, GenServer, Registry, Pool, Task, Application. The patterns are identical; the language is JS.
 
 ## OTP → JS Mapping
 
-| OTP Concept | Elixir | beam-otp JS |
+| OTP Concept | Elixir | quickbeam-js JS |
 |---|---|---|
 | Process | `spawn` / `spawn_link` | `Beam.spawn` |
 | Named process | `Process.register` | `Beam.register` |
@@ -62,13 +62,13 @@ beam-otp takes these low-level primitives and builds the same patterns Elixir us
 The entry point is always one Elixir line:
 
 ```elixir
-children = [{QuickBEAM, name: :beam_otp_root, script: "priv/js/app.js"}]
+children = [{QuickBEAM, name: :quickbeam_js_root, script: "priv/js/app.js"}]
 ```
 
-`app.js` imports beam-otp and starts the root supervisor:
+`app.js` imports quickbeam-js and starts the root supervisor:
 
 ```javascript
-import { Application } from "beam-otp";
+import { Application } from "quickbeam-js";
 import config from "./app.config.js";
 
 Application.start(config);
@@ -158,9 +158,9 @@ class Task {
 
 ## Comparison with Arc
 
-Arc (github.com/alii/arc) and beam-otp share a vision: JS on the BEAM with OTP patterns. They differ fundamentally in approach:
+Arc (github.com/alii/arc) and quickbeam-js share a vision: JS on the BEAM with OTP patterns. They differ fundamentally in approach:
 
-| | beam-otp | Arc |
+| | quickbeam-js | Arc |
 |---|---|---|
 | **Engine** | QuickJS (C, NIF) | Custom VM (Gleam, BEAM bytecode) |
 | **Process model** | OS thread per runtime, contexts share threads | BEAM process per `Arc.spawn` |
@@ -174,17 +174,17 @@ Arc (github.com/alii/arc) and beam-otp share a vision: JS on the BEAM with OTP p
 | **Ready for production** | Today (QuickBEAM 0.7+) | Research stage |
 | **10K instances** | ~570MB bare / ~4.2GB full | ~40MB |
 
-**beam-otp is pragmatic**: wrap a battle-tested JS engine and add OTP patterns in JS. Available today, full JS conformance, rich APIs. Tradeoff: OS threads and C heaps don't scale like BEAM processes.
+**quickbeam-js is pragmatic**: wrap a battle-tested JS engine and add OTP patterns in JS. Available today, full JS conformance, rich APIs. Tradeoff: OS threads and C heaps don't scale like BEAM processes.
 
 **Arc is pure**: build a JS engine that compiles to BEAM bytecode. Every JS process is a BEAM process with all the guarantees. Tradeoff: years from completeness, no Web APIs, no npm.
 
-They're complementary, not competitive. beam-otp is what you use today. Arc is what the future looks like if the BEAM-native engine matures. A future migration path from beam-otp to Arc is architecturally clean — both expose OTP patterns from JS, just with different runtimes underneath.
+They're complementary, not competitive. quickbeam-js is what you use today. Arc is what the future looks like if the BEAM-native engine matures. A future migration path from quickbeam-js to Arc is architecturally clean — both expose OTP patterns from JS, just with different runtimes underneath.
 
 ## Limits
 
 ### The NIF Crash Problem
 
-QuickBEAM contexts run QuickJS on OS threads. A segfault in QuickJS (or a native dependency) crashes the BEAM VM. beam-otp can't fix this — it's a QuickBEAM/Zig constraint. Mitigations:
+QuickBEAM contexts run QuickJS on OS threads. A segfault in QuickJS (or a native dependency) crashes the BEAM VM. quickbeam-js can't fix this — it's a QuickBEAM/Zig constraint. Mitigations:
 - `memory_limit` and `max_reductions` prevent runaway code
 - `apis: false` sandboxes reduce attack surface
 - Future: QuickBEAM could run contexts in separate OS processes (like RabbitMQ's client connection process isolation)
@@ -195,8 +195,8 @@ Each QuickBEAM runtime gets an OS thread. At 10K runtimes you have 10K threads (
 
 ### The Single-Bootstrap Constraint
 
-beam-otp requires one Elixir line to start. If that root runtime crashes, the supervisor tree dies with it. Elixir's application supervisor restarts the root, but the in-memory supervisor state is lost. Mitigation: `Application.start` can persist child specs to ETS or SQLite, and `init` re-reads them.
+quickbeam-js requires one Elixir line to start. If that root runtime crashes, the supervisor tree dies with it. Elixir's application supervisor restarts the root, but the in-memory supervisor state is lost. Mitigation: `Application.start` can persist child specs to ETS or SQLite, and `init` re-reads them.
 
 ### No Hot Code Upgrades
 
-Elixir can hot-swap module code. beam-otp can't — JS code is loaded at startup. A supervisor restart loads fresh code, but that's a process restart, not a hot upgrade. Future: QuickBEAM's `:script` option could watch for file changes and self-reload.
+Elixir can hot-swap module code. quickbeam-js can't — JS code is loaded at startup. A supervisor restart loads fresh code, but that's a process restart, not a hot upgrade. Future: QuickBEAM's `:script` option could watch for file changes and self-reload.

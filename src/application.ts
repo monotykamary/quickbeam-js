@@ -1,5 +1,5 @@
 /**
- * Application — top-level entry point for beam-otp apps.
+ * Application — top-level entry point for quickbeam-js apps.
  *
  * `Application.start(config)` is the JS-side equivalent of Elixir's
  * `Application.start/2`. It starts the root supervisor tree and loads
@@ -40,14 +40,14 @@ const runningApps = new Map<string, Application>();
 
 export const Application = {
   /**
-   * Start a beam-otp application.
+   * Start a quickbeam-js application.
    *
    * This is the top-level entry point. Called from your bootstrap JS
    * file (the one the Elixir side starts via QuickBEAM).
    *
    * @example
    * ```ts
-   * import { Application } from "beam-otp";
+   * import { Application } from "quickbeam-js";
    * Application.start({
    *   id: "my_app",
    *   env: { port: 4000 },
