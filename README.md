@@ -1,10 +1,79 @@
-# quickbeam-js
+<h1 align="center">⚡ quickbeam-js</h1>
 
-OTP patterns in JavaScript, on the BEAM.
+<p align="center">
+  <strong>OTP patterns in JavaScript, on the BEAM.</strong><br />
+  GenServer · Supervisor · Registry · Pool · Task · Application —<br />
+  all in TypeScript, all async, all running on a battle-tested VM.
+</p>
 
-QuickBEAM gives JavaScript access to Erlang/OTP primitives — processes, monitors, links, message passing. quickbeam-js turns those primitives into the same high-level patterns Elixir developers rely on: supervisors with restart strategies, GenServers with call/cast, registries, pools, and applications.
+<p align="center">
+  <a href="#installation"><strong>Install</strong></a> ·
+  <a href="#tour"><strong>Tour</strong></a> ·
+  <a href="https://github.com/monotykamary/quickbeam-js/tree/main/docs/SPEC.md"><strong>API</strong></a> ·
+  <a href="https://github.com/monotykamary/quickbeam-js/tree/main/docs/COOKBOOK.md"><strong>Cookbook</strong></a>
+</p>
 
-The only Elixir you write:
+---
+
+## The elevator pitch
+
+You write JavaScript. You want Erlang's reliability — self-healing processes, supervision trees, message-passing resilience. **quickbeam-js** gives you exactly that.
+
+```ts
+import { GenServer, Supervisor, Pool, Registry, Application } from "quickbeam-js";
+
+// A GenServer is just a class with a few lifecycle methods
+class Counter extends GenServer {
+  async init() {
+    return { count: 0 };               // initial state
+  }
+
+  async handleCall("inc", [by], state) {
+    const next = state.count + by;
+    return { reply: next, state: { count: next } };
+  }
+
+  async handleCall("get", [], state) {
+    return { reply: state.count, state };
+  }
+
+  async handleCast("reset", [], _state) {
+    console.log("resetting…");
+    return { state: { count: 0 } };
+  }
+}
+
+// A supervisor restarts workers on failure — automatically
+const sup = await Supervisor.start({
+  strategy: "one_for_one",
+  children: [
+    { id: "cnt", start: () => Counter.startLink({ name: "my_counter" }) },
+  ],
+});
+
+// Call it — like GenServer.call/2 in Elixir, but JS-native
+const n = await GenServer.call("my_counter", "inc", [3]);
+console.log(n); // 3
+
+// Cast it — fire and forget
+GenServer.cast("my_counter", "reset", []);
+```
+
+That's it. No Elixir modules. No `.ex` files. The only Elixir you need is the bootstrap line that starts QuickBEAM.
+
+---
+
+## Installation
+
+```bash
+# 1. Add QuickBEAM as an Elixir dependency (mix.exs)
+{:quickbeam, "~> 0.10"}
+
+# 2. Install the JS library
+npm install quickbeam-js
+```
+
+Bootstrap from Elixir (the one and only `.ex` line):
 
 ```elixir
 children = [{QuickBEAM, name: :root, script: "priv/js/app.js"}]
@@ -12,149 +81,393 @@ children = [{QuickBEAM, name: :root, script: "priv/js/app.js"}]
 
 Everything else is JavaScript.
 
-## Why
+---
 
-QuickBEAM runs JS on the BEAM, but it's managed from Elixir. Every runtime is an Elixir GenServer. Every pool is an Elixir supervisor. Every handler registration is an Elixir map. This works — but it forces JS developers into Elixir for lifecycle management, and it splits the mental model: JS owns the logic, Elixir owns the lifecycle.
+## Tour
 
-quickbeam-js asks: **what if JS owned both?**
+Every feature below runs inside QuickBEAM — a real BEAM process gets spawned, monitored, and messaged. The TypeScript types are exact; the examples compile.
 
-```javascript
-import { Supervisor, GenServer, Registry, Pool } from "quickbeam-js";
+### 1. GenServer — the core pattern
 
-class Worker extends GenServer {
-  async init() { return { tasks: 0 }; }
-  async handleCall("run", [job], state) {
-    const result = await processJob(job);
-    return { reply: result, state: { ...state, tasks: state.tasks + 1 } };
+GenServer is the foundation. It's a long-lived process with synchronous `call`, asynchronous `cast`, and a `handleInfo` hook for arbitrary messages.
+
+```ts
+class Cache extends GenServer {
+  async init(args: { ttl: number }) {
+    return { ttl: args.ttl, entries: new Map() };
+  }
+
+  async handleCall("get", [key], state) {
+    const entry = state.entries.get(key);
+    if (!entry) return { reply: undefined, state };
+    if (Date.now() - entry.ts > state.ttl) {
+      state.entries.delete(key);
+      return { reply: undefined, state };
+    }
+    return { reply: entry.value, state };
+  }
+
+  async handleCall("set", [key, value], state) {
+    state.entries.set(key, { value, ts: Date.now() });
+    return { reply: "ok", state };
+  }
+
+  // handleInfo catches everything that's not a call or cast —
+  // system messages, direct Beam.send(), monitor exits, etc.
+  async handleInfo(msg: { type: "evict_stale" }, state) {
+    const cutoff = Date.now() - state.ttl;
+    for (const [k, v] of state.entries) {
+      if (v.ts < cutoff) state.entries.delete(k);
+    }
+    return { state };
+  }
+
+  async terminate(reason, state) {
+    console.log("cache shutting down:", reason, `had ${state.entries.size} entries`);
   }
 }
 
-const app = Supervisor.start({
-  strategy: "one_for_one",
+const pid = await GenServer.startLink(Cache, { name: "cache", args: { ttl: 60000 } });
+
+await GenServer.call("cache", "set", ["user:42", { name: "Alice" }]);
+const user = await GenServer.call("cache", "get", ["user:42"]);
+// => { name: "Alice" }
+```
+
+### 2. Supervisor — crash recovery, automatically
+
+Supervisors watch children via BEAM monitors. When a child exits, the supervisor restarts it according to the strategy — no polling, no health checks, no `try/catch` wrappers. The VM tells you the instant it's down.
+
+```ts
+class Worker extends GenServer {
+  async init(id: string) {
+    return { id, processed: 0 };
+  }
+
+  async handleCall("work", [data], state) {
+    // If this throws, the BEAM notifies the supervisor.
+    // The supervisor restarts the GenServer — fresh state, ready to go.
+    const result = await riskyOperation(data);
+    return { reply: result, state: { ...state, processed: state.processed + 1 } };
+  }
+}
+
+const sup = await Supervisor.start({
+  strategy: "one_for_one",       // only restart the crashed child
+  max_restarts: 5,               // at most 5 restarts…
+  max_seconds: 10,               // …in a 10-second window
   children: [
-    { id: "registry", start: () => Registry.start("workers") },
-    { id: "pool", start: () => Pool.start({ name: "workers", size: 4, child: Worker }) },
+    {
+      id: "worker1",
+      start: () => Worker.startLink({ name: "w1", args: "worker-1" }),
+      restart: "permanent",      // always restart
+    },
+    {
+      id: "cache",
+      start: () => Cache.startLink({ name: "cache", args: { ttl: 30000 } }),
+      restart: "transient",      // restart only on abnormal exit
+      shutdown: "infinity",      // wait forever during graceful shutdown
+    },
+    {
+      id: "one-shot",
+      start: () => OneShot.startLink({ name: "os" }),
+      restart: "temporary",      // never restart
+    },
   ],
+});
+
+// Dynamic children at runtime
+await Supervisor.startChild(sup, {
+  id: "worker2",
+  start: () => Worker.startLink({ name: "w2", args: "worker-2" }),
+});
+
+// Terminate on demand
+await Supervisor.terminateChild(sup, "worker2");
+```
+
+**Strategies:**
+
+| Strategy | On child crash… |
+|----------|------------------|
+| `one_for_one` | Restart only the failed child |
+| `one_for_all` | Restart **every** child |
+| `rest_for_one` | Restart the failed child and all started after it |
+
+### 3. Registry — process discovery
+
+The registry maps names to PIDs. When a registered process exits, its entry is automatically removed — no stale references.
+
+```ts
+const reg = await Registry.start("users");
+
+// Register
+const alice = await UserSession.startLink({ name: "alice" });
+reg.register("alice", alice, { role: "admin" });
+
+// Look up
+const [pid, meta] = reg.lookup("alice");
+// pid = <0.123.0>, meta = { role: "admin" }
+await GenServer.call(pid, "get_profile", []);
+
+// Match by pattern
+for (const [pid, meta] of reg.match((key, _val) => key.startsWith("admin:"))) {
+  Beam.send(pid, { type: "alert", text: "Deploy starting" });
+}
+
+// Duplicate keys for pub/sub groups
+const rooms = await Registry.start("rooms", { keys: "duplicate" });
+rooms.register("room:lobby", bob);
+rooms.register("room:lobby", charlie);
+// => both bob and charlie are under "room:lobby"
+```
+
+### 4. Pool — worker checkout, with backpressure
+
+A fixed-size pool of GenServer workers. Checkout blocks when the pool is exhausted; checkin returns a worker to the idle queue. Built on top of a supervisor, so dead workers are automatically replaced.
+
+```ts
+class Renderer extends GenServer {
+  async handleCall("render", [template, data], state) {
+    const html = compile(template, data);     // runs inside QuickBEAM's real DOM
+    return { reply: html, state };
+  }
+}
+
+const pool = await Pool.start({
+  name: "renderers",
+  size: 4,                // 4 CSS-renderer processes
+  child: Renderer,
+  strategy: "fifo",       // or "lifo" for most-recently-used
+});
+
+// Checkout → use → checkin (bare metal)
+const worker = await pool.checkout();
+const html = await GenServer.call(worker, "render", ["home", { user: "alice" }]);
+pool.checkin(worker);
+
+// Transaction — auto-checkin, even on throw
+const html = await pool.transaction(async (worker) => {
+  return await GenServer.call(worker, "render", ["home", { user: "bob" }]);
+});
+
+// Inspect
+pool.status(); // { size: 4, active: 2, idle: 2, overflow: 0 }
+```
+
+### 5. Task — async/await one‑shots
+
+Spawn a process to do one thing, then await the result. Fire-and-forget is one method call away.
+
+```ts
+// Await a result
+const ref = Task.async(() => fetchJson("https://api.example.com/data"));
+const data = await Task.await(ref, 10_000);   // timeout after 10s
+
+// Cancel if needed
+ref.cancel();
+
+// Fire and forget — no await required
+Task.start(() => sendAnalytics("page_view", { path: "/home" }));
+```
+
+### 6. Application — the top-level boot
+
+Wrap your supervision tree in an application. It's the entry-point you hand to QuickBEAM's Elixir bootstrap.
+
+```ts
+import { Application } from "quickbeam-js";
+
+Application.start({
+  id: "my_app",
+  env: { port: 8080, log_level: "debug" },
+
+  supervisor: {
+    strategy: "one_for_one",
+    children: [
+      { id: "registry", start: () => Registry.start("app_registry") },
+      {
+        id: "pool",
+        start: () => Pool.start({
+          name: "workers",
+          size: 8,
+          child: MyWorker,
+        }),
+      },
+      {
+        id: "api",
+        start: () => ApiServer.startLink({ name: "api", args: { port: 8080 } }),
+      },
+    ],
+  },
 });
 ```
 
-No Elixir modules. No split mental model. JS manages JS.
+### 7. Error handling — `_tag` discriminated unions
+
+Every quickbeam-js error extends the native `Error` with a `_tag` property — a string literal that TypeScript can narrow. Chain causes like Go's `%w`, walk them with `findCause`.
+
+```ts
+import { BeamOtpError, findCause } from "quickbeam-js";
+
+class DbError extends Error {
+  constructor(public readonly sql: string, cause: Error) {
+    super(`DB error: ${sql}`, { cause });
+    this.name = "DbError";
+  }
+}
+
+try {
+  const data = await GenServer.call("nonexistent", "get", []);
+} catch (err) {
+  // Narrow by _tag — zero ambiguity
+  if (err instanceof BeamOtpError && err._tag === "BeamOtpError:noproc") {
+    console.log("Nobody's home. Starting fallback…");
+  }
+
+  // Walk the cause chain to find root
+  const dbErr = findCause(err, DbError);
+  if (dbErr) {
+    console.error("Offending query:", dbErr.sql);
+  }
+
+  // Or: err.findCause(DbError) if it's already a BeamOtpError
+}
+```
+
+**All error tags:**
+
+| `_tag` | When |
+|--------|------|
+| `BeamOtpError:timeout` | Call / checkout deadline exceeded |
+| `BeamOtpError:exit` | Target process exited mid-call |
+| `BeamOtpError:noproc` | No process registered under that name |
+| `BeamOtpError:already_started` | Name already taken |
+| `BeamOtpError:not_found` | Child or registry key not found |
+| `BeamOtpError:shutdown` | Supervisor is shutting down |
+| `BeamOtpError:restart_limit` | Too many restarts too fast |
+
+### 8. Utilities — batteries included
+
+```ts
+import { sleep, retry, withTimeout } from "quickbeam-js";
+
+// Non-blocking sleep (yields to the BEAM scheduler)
+await sleep(100);
+
+// Retry with exponential backoff
+const result = await retry(
+  () => flakyApiCall(),
+  { maxAttempts: 5, baseDelayMs: 50, maxDelayMs: 2000 },
+);
+
+// Timeout any promise
+const data = await withTimeout(
+  () => fetch("https://slow.example.com").then(r => r.json()),
+  3000,
+  "slow-http-call",
+);
+// throws BeamOtpError:timeout if > 3s
+```
+
+### 9. Low‑level Beam primitives — full control
+
+quickbeam-js re‑exports QuickBEAM's entire `Beam.*` API. When you don't need OTP wrappers, go direct:
+
+```ts
+import { Beam } from "quickbeam-js";
+
+// Identity
+const self = Beam.self();                 // opaque BeamPid object
+
+// Spawn a raw process (script string — QuickBEAM native)
+const pid = Beam.spawn(`
+  Beam.onMessage((msg) => console.log("child got:", msg));
+`);
+
+// Raw message passing
+Beam.send(pid, { type: "poke" });
+Beam.onMessage((msg) => console.log("received:", msg));
+
+// Monitor — get notified when a process dies
+Beam.monitor(pid, (reason) => {
+  console.log("process exited with:", reason);
+});
+
+// Links — bidirectional crash propagation
+Beam.link(pid);    // if they crash, I crash
+Beam.unlink(pid);  // severed
+
+// Name registration
+Beam.register("my_service");             // registers self
+const found = Beam.whereis("my_service"); // PID or null
+
+// Generate unique references
+const ref = Beam.makeRef();
+
+// Inspect
+Beam.inspect(pid); // "#PID<0.123.0>"
+
+// Time
+Beam.sleep(50);
+Beam.nanoseconds();
+
+// Cluster
+Beam.nodes(); // [:"app@host"]
+
+// Cross-runtime calls
+const result = await Beam.call("service@other", "get_state");
+
+// Elixir ↔ JS bridge (from the Elixir side)
+QuickBEAM.set_global(runtime, "config", %{port: 3000});
+// …in JS:
+// config.port === 3000
+```
+
+---
+
+## How it works
+
+QuickBEAM embeds QuickJS (a full ES2022 engine) into the BEAM, then bridges JS processes to Erlang processes. quickbeam-js is a pure‑JavaScript library that sits on top of that bridge, providing the same abstractions you'd find in Elixir's OTP.
+
+```
+┌──────────────────────────────────────────────────┐
+│ quickbeam-js (TypeScript)                        │
+│   Supervisor · GenServer · Pool · Registry · …   │
+├──────────────────────────────────────────────────┤
+│ QuickBEAM (Zig + QuickJS + lexbor)               │
+│   Beam.spawn · Beam.send · Beam.monitor · …      │
+├──────────────────────────────────────────────────┤
+│ BEAM VM (Erlang/OTP)                             │
+│   Processes · Links · Monitors · Message Queues  │
+└──────────────────────────────────────────────────┘
+```
 
 ## What it is not
 
-- **Not a new JS engine.** quickbeam-js runs on QuickBEAM, which runs QuickJS. Arc is building a BEAM-native JS engine from scratch; quickbeam-js wraps the existing one.
-- **Not a replacement for Elixir supervision.** Under the hood, every JS runtime is still a BEAM GenServer. quickbeam-js just lets you configure and manage it from JS.
-- **Not a framework.** It's a library. You use the pieces you need.
+- **Not a new JS engine.** It runs on QuickBEAM's embedded QuickJS.  
+- **Not an Elixir library.** You don't write `.ex` files to use it (just the one bootstrap line).  
+- **Not a framework.** Use the pieces you need — raw `Beam.*`, a single `GenServer`, or a full `Application` tree.
 
-## Installation
+---
+
+## Testing
+
+Unit tests run against a mock BEAM implementation — no QuickBEAM required:
 
 ```bash
-# QuickBEAM is the runtime dependency
-mix deps.get   # {:quickbeam, "~> 0.7"}
-
-# quickbeam-js is a JS library, shipped as npm package or bundled via QuickBEAM
-npm install quickbeam-js
+npm test           # 61 tests, pure JS
+npx tsc --noEmit   # strict type check
 ```
 
-## Low-level Beam primitives
+Integration tests run against a real QuickBEAM runtime — this is the gold standard:
 
-quickbeam-js re-exports QuickBEAM's full `Beam.*` API. Use these directly when
-you need fine-grained control — no OTP wrappers required.
-
-```javascript
-import { Beam } from "quickbeam-js";
-
-// ── Process identity ──────────────────────────────────────────────
-const self = Beam.self();
-console.log("My PID:", self); // <0.123.0>
-
-// ── Fire-and-forget messaging ─────────────────────────────────────
-Beam.send(somePid, { type: "tick", payload: 42 });
-
-// ── Receive messages (one handler per process) ────────────────────
-Beam.onMessage((msg) => {
-  console.log("got:", msg);
-});
-
-// ── Spawn a new process ───────────────────────────────────────────
-const pid = await Beam.spawn(async () => {
-  Beam.onMessage((msg) => console.log("child got:", msg));
-  await Beam.sleep(1000);
-});
-
-// ── Monitor (get notified when a process exits) ───────────────────
-const ref = Beam.monitor(pid, (exitedPid, reason) => {
-  console.log(`process ${exitedPid} died:`, reason);
-});
-Beam.demonitor(ref); // cancel
-
-// ── Name registration ─────────────────────────────────────────────
-Beam.register("logger", Beam.self());
-const loggerPid = Beam.whereis("logger");
-Beam.unregister("logger");
-
-// ── Links (bidirectional crash propagation) ───────────────────────
-Beam.link(pid);    // if pid crashes, I crash too
-Beam.unlink(pid);
-
-// ── Exit signals ──────────────────────────────────────────────────
-Beam.exitProcess(pid, "shutdown");
-Beam.exit("normal"); // exit myself
-
-// ── Cluster nodes ─────────────────────────────────────────────────
-const nodes = Beam.nodes(); // [:"app@host"]
-const result = await Beam.call("service@other", { type: "ping" });
-
-// ── Transport closures across processes ───────────────────────────
-// Beam.eval runs code or a closure in the context of a target process.
-// This is how you inject behavior into another runtime at runtime.
-const shared = { value: 0, name: "shared" };
-await Beam.eval(childPid, (scope) => {
-  scope.value = 42;
-  Beam.onMessage((msg) => console.log("child received:", msg));
-}, shared);
-// `shared.value` is now 42 inside the child process
-
-// Or pass the scope object directly (QuickBEAM serializes/transports it)
-await Beam.eval(childPid, (scope) => {
-  console.log("Booted with config:", scope.config);
-  scope.onReady();
-}, { config: { port: 8080 }, onReady: () => console.log("ready") });
+```bash
+mix test           # 19 E2E tests on the real BEAM
 ```
 
-All these primitives work both in production (against QuickBEAM's real
-`globalThis.Beam`) and in unit tests (against the mock Beam).
-
-## Quick start
-
-```javascript
-import { Supervisor, GenServer } from "quickbeam-js";
-
-// 1. Define a worker
-class Counter extends GenServer {
-  async init() { return { count: 0 }; }
-  async handleCall("inc", [_by], state) {
-    const next = state.count + 1;
-    return { reply: next, state: { count: next } };
-  }
-  async handleCall("get", [], state) {
-    return { reply: state.count, state };
-  }
-}
-
-// 2. Start a supervisor
-const sup = Supervisor.start({
-  strategy: "one_for_one",
-  children: [
-    { id: "counter1", start: () => Counter.startLink("counter1") },
-  ],
-});
-
-// 3. Use it
-const count = await GenServer.call("counter1", "inc", []);
-// => 1
-```
+---
 
 ## License
 
-MIT
+MIT © [monotykamary](https://github.com/monotykamary)
