@@ -1226,7 +1226,7 @@ _inst.init(_args).then(function(_state) {
 
 //#endregion
 //#region index.ts
-	var __tmpp7YPLf_exports = /* @__PURE__ */ __export({
+	var __tmpSldQ4q_exports = /* @__PURE__ */ __export({
 		Application: () => Application,
 		Beam: () => Beam,
 		BeamOtpError: () => BeamOtpError,
@@ -1245,7 +1245,7 @@ _inst.init(_args).then(function(_state) {
 
 //#endregion
 //#region __entry.ts
-	globalThis.QuickbeamJs = __tmpp7YPLf_exports;
+	globalThis.QuickbeamJs = __tmpSldQ4q_exports;
 
 //#endregion
 })();
