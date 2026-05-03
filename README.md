@@ -77,8 +77,7 @@ In `mix.exs`:
 ```elixir
 defp deps do
   [
-    {:quickbeam, "~> 0.10"},
-    {:quickbeam_js, "~> 0.1"}   # optional Elixir helpers
+    {:quickbeam, "~> 0.10"}
   ]
 end
 ```
@@ -174,17 +173,16 @@ const n = await GenServer.call("counter", "inc", []);
 console.log(n); // 1
 ```
 
-#### Bonus: Use the Elixir helpers
+#### Want the Elixir helpers as a module?
 
-If you added `{:quickbeam_js, "~> 0.1"}` to your deps, you get convenience functions:
+Copy `lib/quickbeam_js.ex` from the [npm package](https://www.npmjs.com/package/quickbeam-js) into your project's `lib/` directory, or reference it directly with a path dependency:
 
 ```elixir
-# Shortcut for the pre-built bundle path:
-{QuickBEAM, name: :app, script: QuickbeamJs.prebuilt_bundle_path()}
-
-# Or bundle your own entry with error handling:
-@js QuickbeamJs.bundle_app!("assets/js/app.ts")
+# mix.exs
+{:quickbeam_js, path: "node_modules/quickbeam-js"}
 ```
+
+Then you get `QuickbeamJs.prebuilt_bundle_path/0` and `QuickbeamJs.bundle_app!/1` at your fingertips.
 
 > **Which path?** Use Path A for production apps — you get tree-shaking, TypeScript checking, and your app and quickbeam-js are one optimised bundle. Use Path B for prototyping and quick experiments.
 
@@ -213,8 +211,7 @@ directory. Follow these steps exactly:
 
 3. DEPENDENCIES
    - Add to mix.exs deps:
-       {:quickbeam, "~> 0.10"},
-       {:quickbeam_js, "~> 0.1"}
+       {:quickbeam, "~> 0.10"}
    - Run: mix deps.get
    - Run: npm init -y && npm install quickbeam-js typescript
    - Create tsconfig.json with target ES2022, strict mode
