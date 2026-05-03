@@ -65,21 +65,128 @@ That's it. No Elixir modules. No `.ex` files. The only Elixir you need is the bo
 
 ## Installation
 
-```bash
-# 1. Add QuickBEAM as an Elixir dependency (mix.exs)
-{:quickbeam, "~> 0.10"}
+### Prerequisites
 
-# 2. Install the JS library
+- **Elixir ≥ 1.17** — QuickBEAM runs on the BEAM VM
+- **Node.js ≥ 18** — for `npm install` and TypeScript tooling
+
+### Step 1: Add QuickBEAM to your Elixir project
+
+In `mix.exs`:
+
+```elixir
+defp deps do
+  [
+    {:quickbeam, "~> 0.10"},
+    {:quickbeam_js, "~> 0.1"}   # optional Elixir helpers
+  ]
+end
+```
+
+Run `mix deps.get`.
+
+### Step 2: Install the JS library
+
+```bash
 npm install quickbeam-js
 ```
 
-Bootstrap from Elixir (the one and only `.ex` line):
+This gets you TypeScript types (`import { GenServer } from "quickbeam-js"`) and source files.
+
+### Step 3: Choose your integration path
+
+You have two options:
+
+#### Path A: Bundle your app + quickbeam-js together (recommended)
+
+Wrap your entry point and let QuickBEAM's OXC bundler resolve imports through `node_modules`:
 
 ```elixir
-children = [{QuickBEAM, name: :root, script: "priv/js/app.js"}]
+# lib/my_app/bundle.ex
+defmodule MyApp.Bundle do
+  @app_js QuickBEAM.JS.bundle_file!("assets/js/app.ts", drop_console: false)
+  def app_js, do: @app_js
+end
 ```
 
-Everything else is JavaScript.
+```ts
+// assets/js/app.ts — your entry point
+import { Application, GenServer, Supervisor, Pool } from "quickbeam-js";
+
+class Worker extends GenServer {
+  async init() { return { count: 0 }; }
+  async handleCall("work", [data], state) {
+    const result = await processJob(data);
+    return { reply: result, state: { count: state.count + 1 } };
+  }
+}
+
+Application.start({
+  id: "my_app",
+  env: { port: 8080 },
+  supervisor: {
+    strategy: "one_for_one",
+    children: [
+      { id: "pool", start: () => Pool.start({ name: "workers", size: 4, child: Worker }) },
+    ],
+  },
+});
+```
+
+Now in your Elixir supervision tree:
+
+```elixir
+children = [
+  {QuickBEAM, name: :app, script: MyApp.Bundle.app_js()}
+]
+```
+
+The bundler reads `assets/js/app.ts`, follows every `import`, inlines all of quickbeam-js, and produces a single JS string — ready for the BEAM.
+
+#### Path B: Drop in the pre-built bundle (quickstart)
+
+The npm package ships a pre-built single-file bundle at `node_modules/quickbeam-js/dist/quickbeam-js.bundle.js`.
+Copy it into your project and load it directly:
+
+```elixir
+# In your supervision tree:
+children = [
+  {QuickBEAM, name: :app, script: "priv/quickbeam-js.bundle.js"}
+]
+```
+
+The bundle sets `globalThis.QuickbeamJs`, so your own scripts can reference it:
+
+```js
+// priv/my_script.js — loaded in a second QuickBEAM runtime
+const { GenServer, Supervisor } = QuickbeamJs;
+
+class Counter extends GenServer {
+  async init() { return { count: 0 }; }
+  async handleCall("inc", [], state) {
+    const next = state.count + 1;
+    return { reply: next, state: { count: next } };
+  }
+}
+
+await GenServer.startLink(Counter, { name: "counter" });
+const n = await GenServer.call("counter", "inc", []);
+console.log(n); // 1
+```
+
+#### Bonus: Use the Elixir helpers
+
+If you added `{:quickbeam_js, "~> 0.1"}` to your deps, you get convenience functions:
+
+```elixir
+# Shortcut for the pre-built bundle path:
+{QuickBEAM, name: :app, script: QuickbeamJs.prebuilt_bundle_path()}
+
+# Or bundle your own entry with error handling:
+@js QuickbeamJs.bundle_app!("assets/js/app.ts")
+```
+
+> **Which path?** Use Path A for production apps — you get tree-shaking, TypeScript checking, and your app and quickbeam-js are one optimised bundle. Use Path B for prototyping and quick experiments.
 
 ---
 

@@ -26,11 +26,13 @@
   ],
   "scripts": {
     "build": "tsc",
+    "build:bundle": "mix run scripts/build_bundle.exs",
+    "prepublishOnly": "npm run build && npm run build:bundle && npm test",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run --dir test/unit",
-    "test:integration": "vitest run --dir test/integration"
+    "test:e2e": "mix test"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
