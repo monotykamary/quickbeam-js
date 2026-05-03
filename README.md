@@ -188,6 +188,97 @@ If you added `{:quickbeam_js, "~> 0.1"}` to your deps, you get convenience funct
 
 > **Which path?** Use Path A for production apps — you get tree-shaking, TypeScript checking, and your app and quickbeam-js are one optimised bundle. Use Path B for prototyping and quick experiments.
 
+### 🤖 AI‑assisted setup
+
+Copy this prompt into Claude, ChatGPT, Cursor, or any other AI coding tool.
+It will scaffold an entire quickbeam-js project in one shot — no Elixir knowledge needed.
+
+<details>
+<summary><strong>📋 Click to copy the setup prompt</strong></summary>
+
+```text
+Set up a new QuickBEAM + quickbeam-js project called "my_app" in the current
+directory. Follow these steps exactly:
+
+1. SYSTEM CHECK
+   - If Elixir is not available, install it via mise:
+     - If mise is not installed: curl https://mise.run | sh
+     - Then: mise install elixir@latest && mise use elixir@latest
+   - Verify: elixir --version outputs Elixir >= 1.17
+   - If Node.js is not available: mise install node@lts && mise use node@lts
+
+2. PROJECT SCAFFOLDING
+   - Run: mix new my_app --sup
+   - cd my_app
+
+3. DEPENDENCIES
+   - Add to mix.exs deps:
+       {:quickbeam, "~> 0.10"},
+       {:quickbeam_js, "~> 0.1"}
+   - Run: mix deps.get
+   - Run: npm init -y && npm install quickbeam-js typescript
+   - Create tsconfig.json with target ES2022, strict mode
+
+4. APP ENTRY POINT
+   - Create assets/js/app.ts:
+     ```typescript
+     import { Application, GenServer, Supervisor, Pool } from "quickbeam-js";
+
+     class Worker extends GenServer {
+       async init(args: { id: number }) {
+         return { id: args.id, processed: 0 };
+       }
+       async handleCall("work", [job], state) {
+         const result = `worker ${state.id} processed: ${job}`;
+         return { reply: result, state: { ...state, processed: state.processed + 1 } };
+       }
+     }
+
+     Application.start({
+       id: "my_app",
+       env: { port: 4000 },
+       supervisor: {
+         strategy: "one_for_one",
+         children: [
+           { id: "pool", start: () => Pool.start({
+               name: "workers", size: 4, child: Worker, childArgs: { id: 0 }
+           })},
+         ],
+       },
+     });
+     ```
+
+5. BUNDLER MODULE
+   - Create lib/my_app/bundle.ex:
+     ```elixir
+     defmodule MyApp.Bundle do
+       @app_js QuickBEAM.JS.bundle_file!("assets/js/app.ts", drop_console: false)
+       def app_js, do: @app_js
+     end
+     ```
+
+6. SUPERVISION TREE
+   - In lib/my_app/application.ex, add QuickBEAM to the children list:
+     ```elixir
+     children = [
+       {QuickBEAM, name: :app, script: MyApp.Bundle.app_js()}
+     ]
+     ```
+
+7. VERIFY
+   - Run: mix compile --force
+   - Run: iex -S mix
+   - The app should boot without errors
+   - The pool of 4 workers is now running on the BEAM
+
+8. DONE
+   - Print a summary of what was created and how the user can interact with it
+```
+
+</details>
+
+> Replace `"my_app"` with your project name and adjust `Worker` to do your actual work. The scaffolded project compiles at build time — your entire app + quickbeam-js becomes one JS string, loaded onto the BEAM.
+
 ---
 
 ## Tour
