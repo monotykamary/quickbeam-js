@@ -94,6 +94,7 @@ export abstract class GenServer {
     message: any,
     timeout?: number,
   ): Promise<any> {
+    installMessageDispatcher();
     const ms = timeout ?? 5000;
     const pid = resolveTarget(target);
     const ref = Beam.makeRef();
@@ -218,7 +219,7 @@ async function runLoop(
   let state = initialState;
   const selfPid = Beam.self();
 
-  Beam.onMessage(async (msg: any) => {
+  setGenServerHandler(async (msg: any) => {
     state = await dispatch(instance, msg, state, selfPid);
   });
 }
@@ -322,5 +323,55 @@ function getReplyHandlers(): Map<string, (reply: any) => void> {
 }
 
 function refKey(ref: BeamRef): string {
-  return "ref:" + ((ref as any).id ?? String(ref));
+  // Use __beam_data__ for stable keys across JS wrapper instances.
+  const data = (ref as any).__beam_data__;
+  if (data instanceof Uint8Array) {
+    let hex = "";
+    for (let i = 0; i < data.length; i++) {
+      hex += data[i].toString(16).padStart(2, "0");
+    }
+    return "ref:" + hex;
+  }
+  return "ref:" + String(ref);
+}
+
+// ── Global message dispatcher ───────────────────────────────────────
+// QuickBEAM's Beam.onMessage supports only ONE handler.
+// This unified dispatcher routes to:
+//   1. Reply handlers (GenServer.call Promise resolvers)
+//   2. The GenServer message handler (if this process is a GenServer)
+
+let _genserverHandler: ((msg: any) => void) | null = null;
+
+function installMessageDispatcher(): void {
+  Beam.onMessage((msg: any) => {
+    if (msg && msg.type === "reply") {
+      const replyMsg = msg as GenReplyMessage;
+      const handlers = (globalThis as any).__quickbeam_js_reply_handlers as
+        | Map<string, (reply: any) => void>
+        | undefined;
+      if (handlers) {
+        const handler = handlers.get(refKey(replyMsg.ref));
+        if (handler) {
+          handler(replyMsg);
+          return;
+        }
+      }
+    }
+
+    if (_genserverHandler) {
+      _genserverHandler(msg);
+      return;
+    }
+  });
+}
+
+export function setGenServerHandler(
+  handler: ((msg: any) => void) | null,
+): void {
+  _genserverHandler = handler;
+  // Re-register the dispatcher every time — necessary because in mock
+  // environments, Beam.onMessage is per-process and _dispatcherInstalled
+  // is a shared module-level flag.
+  installMessageDispatcher();
 }

@@ -44,7 +44,7 @@ export type {
 } from "./types.js";
 
 // ── GenServer ──────────────────────────────────────────────────────
-export { GenServer } from "./gen-server.js";
+export { GenServer, runGenServerLoop } from "./gen-server.js";
 
 // ── Supervisor — exports both the type and the namespace value ─────
 export { Supervisor } from "./supervisor.js";

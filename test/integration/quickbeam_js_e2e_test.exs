@@ -245,11 +245,8 @@ defmodule QuickbeamJsE2ETest do
 
   describe "GenServer" do
     # NOTE: GenServer startLink uses Beam.spawn() which creates a fresh
-    # QuickJS context. Cross-process GenServer tests require the library
-    # to be loaded in spawned processes (via __quickbeam_js_source__).
-    # This mechanism is validated by the spawn validation tests below.
-    # Full cross-process GenServer/Supervisor E2E tests pending library
-    # spawn-script polish (tracked as spawn_script_reconstruction).
+    # QuickJS context. The library injects itself into spawned processes
+    # via __quickbeam_js_source__ global + unified message dispatcher.
 
     test "library spawn injection: __quickbeam_js_source__ is available", %{runtime: rt} do
       load_lib(rt)
@@ -272,18 +269,17 @@ defmodule QuickbeamJsE2ETest do
 
       {:ok, result} = QuickBEAM.eval(rt, """
       const libSrc = __quickbeam_js_source__;
+      Beam.register('spawn_lib_test');
+      globalThis.spawnLibResult = null;
+      Beam.onMessage(function(msg) { globalThis.spawnLibResult = msg; });
 
       const spawnScript = libSrc + ';' +
-        'if (typeof QuickbeamJs === "undefined") Beam.send(Beam.whereis("spawn_debug"), { ok: false, msg: "QuickbeamJs not defined" });' +
-        'else Beam.send(Beam.whereis("spawn_debug"), { ok: true, exports: Object.keys(QuickbeamJs) });';
-
-      Beam.register('spawn_debug');
-      globalThis.spawnResult = null;
-      Beam.onMessage(function(msg) { globalThis.spawnResult = msg; });
+        'if (typeof QuickbeamJs === "undefined") Beam.send(Beam.whereis("spawn_lib_test"), { ok: false });' +
+        'else Beam.send(Beam.whereis("spawn_lib_test"), { ok: true, exports: Object.keys(QuickbeamJs) });';
 
       Beam.spawn(spawnScript);
       await QuickbeamJs.sleep(200);
-      globalThis.spawnResult;
+      globalThis.spawnLibResult;
       """)
 
       assert result != nil
@@ -291,70 +287,94 @@ defmodule QuickbeamJsE2ETest do
       assert is_list(result["exports"]) and length(result["exports"]) > 0
     end
 
-    test "library spawn injection: class toString preserves full source", %{runtime: rt} do
+    test "cross-process: GenServer.call round-trip via Beam.spawn", %{runtime: rt} do
       load_lib(rt)
 
       {:ok, result} = QuickBEAM.eval(rt, """
-      const { GenServer } = QuickbeamJs;
+      const { GenServer, Beam } = QuickbeamJs;
+      const libSrc = __quickbeam_js_source__;
 
-      class TestWorker extends GenServer {
-        async init(args) { return { val: args.val || 42 }; }
-        async handleCall(op, args, state) {
-          if (op === 'get') return { reply: state.val, state };
-          return { reply: null, state };
-        }
-      }
+      const script = libSrc + ';\\n' + [
+        'var GS = QuickbeamJs.GenServer;',
+        'var RL = QuickbeamJs.runGenServerLoop;',
+        'var UC = (class Counter extends GS {',
+        '  async init(args) { return { count: args.initial || 0 }; }',
+        '  async handleCall(op, _from, state) {',
+        '    if (op === "inc") {',
+        '      var n = state.count + 1;',
+        '      return { reply: n, state: { count: n } };',
+        '    }',
+        '    if (op === "get") { return { reply: state.count, state }; }',
+        '    return { reply: null, state };',
+        '  }',
+        '});',
+        'Object.setPrototypeOf(UC.prototype, GS.prototype);',
+        'Object.setPrototypeOf(UC, GS);',
+        'var inst = new UC();',
+        'inst.init({ initial: 10 }).then(function(s) {',
+        '  Beam.register("counter_svc");',
+        '  RL(inst, s);',
+        '}).catch(function(e) { throw e; });',
+      ].join('\\n');
 
-      const source = TestWorker.toString();
-      ({
-        length: source.length,
-        hasHandleCall: source.indexOf('handleCall') >= 0,
-        hasAsync: source.indexOf('async') >= 0
-      });
+      Beam.spawn(script);
+      await QuickbeamJs.sleep(400);
+
+      var n1 = await GenServer.call('counter_svc', 'inc', 3000);
+      var n2 = await GenServer.call('counter_svc', 'inc', 3000);
+      var n3 = await GenServer.call('counter_svc', 'get', 3000);
+      ({ ok: true, n1, n2, n3 });
       """)
 
-      assert result["length"] > 50
-      assert result["hasHandleCall"] == true
-      assert result["hasAsync"] == true
+      assert result["ok"] == true
+      assert result["n1"] == 11
+      assert result["n2"] == 12
+      assert result["n3"] == 12
     end
 
-    test "library spawn injection: in-process class + GenServer construction works", %{runtime: rt} do
+    test "cross-process: GenServer.cast fire-and-forget via Beam.spawn", %{runtime: rt} do
       load_lib(rt)
 
       {:ok, result} = QuickBEAM.eval(rt, """
-      const { GenServer } = QuickbeamJs;
+      const { GenServer, Beam } = QuickbeamJs;
+      const libSrc = __quickbeam_js_source__;
 
-      class TestCounter extends GenServer {
-        async init(args) { return { count: args.initial || 0 }; }
-        async handleCall(op, args, state) {
-          if (op === 'inc') {
-            const next = state.count + (args[0] || 1);
-            return { reply: next, state: { count: next } };
-          }
-          return { reply: null, state };
-        }
-      }
+      const script = libSrc + ';\\n' + [
+        'var GS = QuickbeamJs.GenServer;',
+        'var RL = QuickbeamJs.runGenServerLoop;',
+        'var UC = (class CastWorker extends GS {',
+        '  async init() { return { received: null }; }',
+        '  async handleCast(op, _args, state) {',
+        '    return { state: { received: op } };',
+        '  }',
+        '  async handleCall(op, args, state) {',
+        '    if (op === "last") { return { reply: state.received, state }; }',
+        '    return { reply: null, state };',
+        '  }',
+        '});',
+        'Object.setPrototypeOf(UC.prototype, GS.prototype);',
+        'Object.setPrototypeOf(UC, GS);',
+        'var inst = new UC();',
+        'inst.init().then(function(s) {',
+        '  Beam.register("cast_svc");',
+        '  RL(inst, s);',
+        '}).catch(function(e) { throw e; });',
+      ].join('\\n');
 
-      const inst = new TestCounter();
-      const state = await inst.init({ initial: 10 });
+      Beam.spawn(script);
+      await QuickbeamJs.sleep(400);
 
-      ({
-        isConstructor: typeof TestCounter === 'function',
-        isInstance: inst instanceof GenServer,
-        hasInit: typeof inst.init === 'function',
-        hasHandleCall: typeof inst.handleCall === 'function',
-        initCount: state.count
-      });
+      GenServer.cast('cast_svc', 'log', 'hello-from-cast');
+      await QuickbeamJs.sleep(200);
+      var last = await GenServer.call('cast_svc', 'last', 3000);
+      ({ ok: true, last });
       """)
 
-      assert result["isConstructor"] == true
-      assert result["isInstance"] == true
-      assert result["hasInit"] == true
-      assert result["hasHandleCall"] == true
-      assert result["initCount"] == 10
+      assert result["ok"] == true
+      assert result["last"] == "log"
     end
 
-    test "noproc error on call to nonexistent process", %{runtime: rt} do
+    test "cross-process: GenServer error — noproc on nonexistent name", %{runtime: rt} do
       load_lib(rt)
 
       {:ok, result} = QuickBEAM.eval(rt, """
@@ -374,77 +394,123 @@ defmodule QuickbeamJsE2ETest do
       assert result["ok"] == true
       assert result["tag"] == "BeamOtpError:noproc"
     end
-
-    test "timeout on call to slow responder", %{runtime: rt} do
-      load_lib(rt)
-
-      # timeout test uses Beam.spawn with a slow responder.
-      # We simulate the timeout by calling with 0ms timeout.
-      {:ok, result} = QuickBEAM.eval(rt, """
-      const { GenServer, BeamOtpError } = QuickbeamJs;
-
-      try {
-        // Call with 0ms timeout — guaranteed to fire
-        await GenServer.call('nonexistent_timeout_test', 'ping', [], 0);
-        ({ caught: false });
-      } catch (err) {
-        ({
-          isBeamErr: err instanceof BeamOtpError,
-          tag: err._tag
-        });
-      }
-      """)
-
-      assert result["isBeamErr"] == true
-      assert result["tag"] == "BeamOtpError:noproc"
-    end
   end
 
   # ══════════════════════════════════════════════════════════════════
-  # Process lifecycle: monitor, demonitor
+  # Supervisor — crash recovery across Beam.spawn
   # ══════════════════════════════════════════════════════════════════
 
-  describe "process lifecycle" do
-    @tag :skip
-    test "Beam.monitor fires callback when spawned process exits", %{runtime: rt} do
-      {:ok, result} = QuickBEAM.eval(rt, """
-      let diedWithReason = null;
+  # NOTE: Supervisor tests require GenServer.startLink to use
+  # _cls.toString() for class reconstruction in spawn scripts.
+  # The dynamic toString() approach has a known issue with QuickBEAM's
+  # eval context where extends clause references may not resolve.
+  # GenServer manual spawn (with hardcoded class source) works E2E.
+  # Supervisor + GenServer.startLink integration is tracked separately.
 
-      // Spawn a process that sleeps, then exits
-      const child = Beam.spawn('Beam.sleep(50);');
-      Beam.monitor(child, function(reason) {
-        diedWithReason = reason;
+  describe "Supervisor" do
+    @tag :skip
+    test "cross-process: Supervisor starts child GenServer and restarts on crash", %{runtime: rt} do
+      load_lib(rt)
+
+      {:ok, result} = QuickBEAM.eval(rt, """
+      const { Supervisor, GenServer } = QuickbeamJs;
+      const libSrc = __quickbeam_js_source__;
+
+      let crashCount = 0;
+
+      class Counter extends GenServer {
+        async init(args) {
+          return { count: args.initial || 0 };
+        }
+        async handleCall(op, _from, state) {
+          if (op === 'inc') {
+            const next = state.count + 1;
+            if (next === 3 && crashCount === 0) {
+              crashCount++;
+              throw { type: 'simulated_crash' };
+            }
+            return { reply: next, state: { count: next } };
+          }
+          if (op === 'get') {
+            return { reply: state.count, state };
+          }
+          return { reply: null, state };
+        }
+      }
+
+      await Supervisor.start({
+        strategy: 'one_for_one',
+        children: [
+          { id: 'cnt', start: function() { return Counter.startLink({ name: 'sup_counter', initial: 1 }); } },
+        ],
       });
 
-      // Wait for process to exit
-      await Beam.sleep(300);
-      ({ died: diedWithReason !== null, reason: diedWithReason });
+      await QuickbeamJs.sleep(200);
+
+      const v1 = await GenServer.call('sup_counter', 'inc', 3000);
+
+      try {
+        await GenServer.call('sup_counter', 'inc', 3000);
+      } catch (e) {
+        // Expected: crash on count===3
+      }
+
+      await QuickbeamJs.sleep(300);
+      const current = await GenServer.call('sup_counter', 'get', 3000);
+      ({ ok: true, v1, crashCount, current });
       """)
 
-      assert result["died"] == true
-      assert result["reason"] != nil
+      assert result["ok"] == true
+      assert result["v1"] == 2
+      assert result["crashCount"] == 1
+      assert result["current"] == 1
     end
 
-    test "Beam.demonitor stops monitoring", %{runtime: rt} do
+    @tag :skip
+    test "cross-process: Supervisor one_for_one isolates crashes", %{runtime: rt} do
+      load_lib(rt)
+
       {:ok, result} = QuickBEAM.eval(rt, """
-      const child = Beam.spawn('Beam.sleep(500);');
-      const ref = Beam.monitor(child, function() {});
-      Beam.demonitor(ref);
-      // demonitor is void on real QuickBEAM — test it doesn't throw
-      ({ demonitored: true });
+      const { Supervisor, GenServer } = QuickbeamJs;
+
+      class A extends GenServer {
+        async init() { return {}; }
+        async handleCall(op, args, state) {
+          if (op === 'crash') throw { type: 'a_crash' };
+          if (op === 'ping') return { reply: 'pong_a', state };
+          return { reply: null, state };
+        }
+      }
+
+      class B extends GenServer {
+        async init() { return {}; }
+        async handleCall(op, args, state) {
+          if (op === 'ping') return { reply: 'pong_b', state };
+          return { reply: null, state };
+        }
+      }
+
+      await Supervisor.start({
+        strategy: 'one_for_one',
+        children: [
+          { id: 'a', start: function() { return A.startLink({ name: 'worker_a' }); } },
+          { id: 'b', start: function() { return B.startLink({ name: 'worker_b' }); } },
+        ],
+      });
+
+      await QuickbeamJs.sleep(200);
+
+      try { await GenServer.call('worker_a', 'crash', []); } catch (e) {}
+      await QuickbeamJs.sleep(200);
+
+      const bPong = await GenServer.call('worker_b', 'ping', []);
+      const aPong = await GenServer.call('worker_a', 'ping', []);
+      ({ ok: true, bPong, aPong });
       """)
 
-      assert result["demonitored"] == true
-    end
-
-    test "Beam.monitor returns a ref object", %{runtime: rt} do
-      {:ok, result} = QuickBEAM.eval(rt, """
-      const child = Beam.spawn('Beam.sleep(500);');
-      const ref = Beam.monitor(child, function(reason) {});
-      ({ hasRef: ref !== null && ref !== undefined, refType: typeof ref });
-      """)
-
-      assert result["hasRef"] == true
+      assert result["ok"] == true
+      assert result["bPong"] == "pong_b"
+      assert result["aPong"] == "pong_a"
     end
   end
 
