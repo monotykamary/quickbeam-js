@@ -321,6 +321,8 @@ const { GenServer: _QbGenServer, runGenServerLoop } = QuickbeamJs;
 		const script = `
 ${bootstrap}
 
+const GenServer = _QbGenServer;
+
 const _UserClass = (${classSource});
 Object.setPrototypeOf(_UserClass.prototype, _QbGenServer.prototype);
 Object.setPrototypeOf(_UserClass, _QbGenServer);
@@ -1226,7 +1228,7 @@ _inst.init(_args).then(function(_state) {
 
 //#endregion
 //#region index.ts
-	var __tmpSldQ4q_exports = /* @__PURE__ */ __export({
+	var __tmpSMXAxv_exports = /* @__PURE__ */ __export({
 		Application: () => Application,
 		Beam: () => Beam,
 		BeamOtpError: () => BeamOtpError,
@@ -1245,7 +1247,7 @@ _inst.init(_args).then(function(_state) {
 
 //#endregion
 //#region __entry.ts
-	globalThis.QuickbeamJs = __tmpSldQ4q_exports;
+	globalThis.QuickbeamJs = __tmpSMXAxv_exports;
 
 //#endregion
 })();

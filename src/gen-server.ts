@@ -31,27 +31,6 @@ function isMockEnvironment(): boolean {
   return (globalThis as any).__quickbeam_mock !== undefined;
 }
 
-// ── Library bootstrap (for real QuickBEAM spawn scripts) ───────────
-
-let _libraryBootstrap: string | null = null;
-
-function getLibraryBootstrap(): string {
-  if (_libraryBootstrap) return _libraryBootstrap;
-  _libraryBootstrap = `
-if (typeof QuickbeamJs === "undefined") {
-  if (typeof require === "undefined") {
-    throw new Error("QuickbeamJs not loaded. Ensure quickbeam-js is pre-loaded.");
-  }
-}
-const { GenServer: _QbGenServer, runGenServerLoop } = QuickbeamJs;
-`.trim();
-  return _libraryBootstrap;
-}
-
-export function resetLibraryBootstrap(): void {
-  _libraryBootstrap = null;
-}
-
 // ── Abstract GenServer ─────────────────────────────────────────────
 
 export abstract class GenServer {
@@ -196,24 +175,33 @@ async function spawnRealGenServer(
   const classSource = _cls.toString();
   const argsJson = JSON.stringify(args ?? null);
   const nameJson = JSON.stringify(name ?? null);
-  const bootstrap = getLibraryBootstrap();
 
-  const script = `
-${bootstrap}
+  // On real QuickBEAM, spawned processes have a separate QuickJS context.
+  // Embed the full library source in the spawn script so QuickbeamJs is available.
+  const libSrc: string = (globalThis as any).__quickbeam_js_source__ || '';
+  const genServerSetup = [
+    'if (typeof QuickbeamJs === "undefined") {',
+    '  throw new Error("QuickbeamJs could not be loaded in spawned process");',
+    '}',
+    'var _qb = QuickbeamJs;',
+    'var GenServer = _qb.GenServer;',
+    'var runGenServerLoop = _qb.runGenServerLoop;',
+    '',
+    'var _UserClass = (' + classSource + ');',
+    'Object.setPrototypeOf(_UserClass.prototype, GenServer.prototype);',
+    'Object.setPrototypeOf(_UserClass, GenServer);',
+    '',
+    'var _inst = new _UserClass();',
+    'var _args = ' + argsJson + ';',
+    'var _name = ' + nameJson + ';',
+    '',
+    '_inst.init(_args).then(function(_state) {',
+    '  if (_name) Beam.register(_name);',
+    '  runGenServerLoop(_inst, _state);',
+    '}).catch(function(err) { throw err; });',
+  ].join('\n');
 
-const _UserClass = (${classSource});
-Object.setPrototypeOf(_UserClass.prototype, _QbGenServer.prototype);
-Object.setPrototypeOf(_UserClass, _QbGenServer);
-
-const _inst = new _UserClass();
-const _args = ${argsJson};
-const _name = ${nameJson};
-
-_inst.init(_args).then(function(_state) {
-  if (_name) Beam.register(_name);
-  runGenServerLoop(_inst, _state);
-}).catch(function(err) { throw err; });
-`.trim();
+  const script = libSrc + ';\n' + genServerSetup;
 
   const pid = Beam.spawn(script);
   Beam.link(pid);
