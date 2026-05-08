@@ -186,6 +186,19 @@ export const Pool = {
 };
 
 function pidsEqual(a: BeamPid, b: BeamPid): boolean {
-  return (a as any).__beam_type__ === "pid" && (b as any).__beam_type__ === "pid"
-    && ((a as any).id === (b as any).id || (a as any).__beam_data__ === (b as any).__beam_data__);
+  if ((a as any).__beam_type__ !== "pid" || (b as any).__beam_type__ !== "pid") {
+    return false;
+  }
+  // Compare by stable identity: __beam_data__ (real QuickBEAM) or id (mock)
+  const aData = (a as any).__beam_data__;
+  const bData = (b as any).__beam_data__;
+  if (aData !== undefined && bData !== undefined) {
+    if (aData.length !== bData.length) return false;
+    for (let i = 0; i < aData.length; i++) {
+      if (aData[i] !== bData[i]) return false;
+    }
+    return true;
+  }
+  // Fallback to id for mock PIDs
+  return (a as any).id === (b as any).id;
 }

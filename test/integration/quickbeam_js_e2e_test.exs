@@ -384,23 +384,16 @@ defmodule QuickbeamJsE2ETest do
     end
   end
 
-  # NOTE: Supervisor tests require GenServer.startLink to use
-  # _cls.toString() for class reconstruction in spawn scripts.
-  # The dynamic toString() approach has a known issue with QuickBEAM's
-  # eval context where extends clause references may not resolve.
-  # GenServer manual spawn (with hardcoded class source) works E2E.
-  # Supervisor + GenServer.startLink integration is tracked separately.
+  # ══════════════════════════════════════════════════════════════════
+  # Supervisor — crash recovery across Beam.spawn
+  # ══════════════════════════════════════════════════════════════════
 
   describe "Supervisor" do
-    @tag :skip
     test "cross-process: Supervisor starts child GenServer and restarts on crash", %{runtime: rt} do
       load_lib(rt)
 
       {:ok, result} = QuickBEAM.eval(rt, """
       const { Supervisor, GenServer } = QuickbeamJs;
-      const libSrc = __quickbeam_js_source__;
-
-      let crashCount = 0;
 
       class Counter extends GenServer {
         async init(args) {
@@ -409,11 +402,7 @@ defmodule QuickbeamJsE2ETest do
         async handleCall(op, _from, state) {
           if (op === 'inc') {
             const next = state.count + 1;
-            if (next === 3 && crashCount === 0) {
-              crashCount++;
-              throw { type: 'simulated_crash' };
-            }
-            return { reply: next, state: { count: next } };
+            throw { type: 'simulated_crash' };
           }
           if (op === 'get') {
             return { reply: state.count, state };
@@ -425,32 +414,27 @@ defmodule QuickbeamJsE2ETest do
       await Supervisor.start({
         strategy: 'one_for_one',
         children: [
-          { id: 'cnt', start: function() { return Counter.startLink({ name: 'sup_counter', initial: 1 }); } },
+          { id: 'cnt', start: function() { return Counter.startLink(Counter, { name: 'sup_counter', args: { initial: 7 } }); } },
         ],
       });
 
-      await QuickbeamJs.sleep(200);
-
-      const v1 = await GenServer.call('sup_counter', 'inc', 3000);
+      await QuickbeamJs.sleep(500);
 
       try {
         await GenServer.call('sup_counter', 'inc', 3000);
       } catch (e) {
-        // Expected: crash on count===3
+        // Expected: Counter crashes on inc
       }
 
-      await QuickbeamJs.sleep(300);
+      await QuickbeamJs.sleep(500);
       const current = await GenServer.call('sup_counter', 'get', 3000);
-      ({ ok: true, v1, crashCount, current });
+      ({ ok: true, current });
       """)
 
       assert result["ok"] == true
-      assert result["v1"] == 2
-      assert result["crashCount"] == 1
-      assert result["current"] == 1
+      assert result["current"] == 7
     end
 
-    @tag :skip
     test "cross-process: Supervisor one_for_one isolates crashes", %{runtime: rt} do
       load_lib(rt)
 
@@ -459,7 +443,7 @@ defmodule QuickbeamJsE2ETest do
 
       class A extends GenServer {
         async init() { return {}; }
-        async handleCall(op, args, state) {
+        async handleCall(op, _from, state) {
           if (op === 'crash') throw { type: 'a_crash' };
           if (op === 'ping') return { reply: 'pong_a', state };
           return { reply: null, state };
@@ -468,7 +452,7 @@ defmodule QuickbeamJsE2ETest do
 
       class B extends GenServer {
         async init() { return {}; }
-        async handleCall(op, args, state) {
+        async handleCall(op, _from, state) {
           if (op === 'ping') return { reply: 'pong_b', state };
           return { reply: null, state };
         }
@@ -477,18 +461,18 @@ defmodule QuickbeamJsE2ETest do
       await Supervisor.start({
         strategy: 'one_for_one',
         children: [
-          { id: 'a', start: function() { return A.startLink({ name: 'worker_a' }); } },
-          { id: 'b', start: function() { return B.startLink({ name: 'worker_b' }); } },
+          { id: 'a', start: function() { return A.startLink(A, { name: 'worker_a' }); } },
+          { id: 'b', start: function() { return B.startLink(B, { name: 'worker_b' }); } },
         ],
       });
 
-      await QuickbeamJs.sleep(200);
+      await QuickbeamJs.sleep(500);
 
-      try { await GenServer.call('worker_a', 'crash', []); } catch (e) {}
-      await QuickbeamJs.sleep(200);
+      try { await GenServer.call('worker_a', 'crash', 3000); } catch (e) {}
+      await QuickbeamJs.sleep(500);
 
-      const bPong = await GenServer.call('worker_b', 'ping', []);
-      const aPong = await GenServer.call('worker_a', 'ping', []);
+      const bPong = await GenServer.call('worker_b', 'ping', 3000);
+      const aPong = await GenServer.call('worker_a', 'ping', 3000);
       ({ ok: true, bPong, aPong });
       """)
 

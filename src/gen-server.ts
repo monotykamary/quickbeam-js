@@ -173,9 +173,13 @@ async function spawnRealGenServer(
   name: string | undefined,
   args: any,
 ): Promise<BeamPid> {
-  const classSource = _cls.toString();
   const argsJson = JSON.stringify(args ?? null);
   const nameJson = JSON.stringify(name ?? null);
+
+  // Capture overridden method implementations from the instance.
+  // Function.prototype.toString() serializes them as source,
+  // avoiding class reconstruction issues in QuickBEAM's eval scope.
+  const methodSources = captureOverriddenMethods(_instance);
 
   // On real QuickBEAM, spawned processes have a separate QuickJS context.
   // Embed the full library source in the spawn script so QuickbeamJs is available.
@@ -184,15 +188,13 @@ async function spawnRealGenServer(
     'if (typeof QuickbeamJs === "undefined") {',
     '  throw new Error("QuickbeamJs could not be loaded in spawned process");',
     '}',
-    'var _qb = QuickbeamJs;',
-    'var GenServer = _qb.GenServer;',
-    'var runGenServerLoop = _qb.runGenServerLoop;',
+    'var GenServer = QuickbeamJs.GenServer;',
+    'var runGenServerLoop = QuickbeamJs.runGenServerLoop;',
     '',
-    'var _UserClass = (' + classSource + ');',
-    'Object.setPrototypeOf(_UserClass.prototype, GenServer.prototype);',
-    'Object.setPrototypeOf(_UserClass, GenServer);',
+    // Create instance via Object.create to avoid class reconstruction
+    'var _inst = Object.create(GenServer.prototype);',
+    methodSources,
     '',
-    'var _inst = new _UserClass();',
     'var _args = ' + argsJson + ';',
     'var _name = ' + nameJson + ';',
     '',
@@ -207,6 +209,68 @@ async function spawnRealGenServer(
   const pid = Beam.spawn(script);
   Beam.link(pid);
   return pid;
+}
+
+/**
+ * Capture overridden method implementations from a GenServer instance.
+ *
+ * Instead of serializing the entire class (which fails in QuickBEAM's
+ * eval scope due to prototype chain manipulation limits), we capture
+ * each overridden method's source and reassign on the new instance.
+ *
+ * Class method toString() produces "async handleCall(op, from, state) { ... }"
+ * (named function expressions). QuickJS doesn't support named async function
+ * expressions as standalone statements. We strip the name to produce
+ * "async function(op, from, state) { ... }" (anonymous form).
+ */
+function captureOverriddenMethods(instance: GenServer): string {
+  const methods: string[] = [];
+  const baseProto = GenServer.prototype;
+
+  const overridableMethods = [
+    "handleCall",
+    "handleCast",
+    "handleInfo",
+    "terminate",
+    "codeChange",
+  ] as const;
+
+  for (const methodName of overridableMethods) {
+    const own = (instance as any)[methodName];
+    const base = (baseProto as any)[methodName];
+    // Only capture if the instance's method differs from the base GenServer's
+    if (typeof own === "function" && own !== base) {
+      const src = methodToString(own);
+      methods.push("_inst." + methodName + " = " + src + ";");
+    }
+  }
+
+  // init is special — always capture it since it's always overridden
+  // (GenServer's init returns undefined but user's returns initial state)
+  const initFn = (instance as any).init;
+  if (typeof initFn === "function" && initFn !== (baseProto as any).init) {
+    methods.push("_inst.init = " + methodToString(initFn) + ";");
+  }
+
+  return methods.join("\n");
+}
+
+/**
+ * Convert a class method's toString() output into an anonymous function expression.
+ *
+ * Input:  "async handleCall(op, from, state) { ... }"
+ * Output: "async function(op, from, state) { ... }"
+ */
+function methodToString(fn: Function): string {
+  const src = fn.toString();
+  // Match: [async] methodName(params) { body }
+  const match = src.match(/^(async\s+)?([\w$]+)\s*\(/);
+  if (match) {
+    const prefix = match[1] ? "async function(" : "function(";
+    return src.replace(/^(async\s+)?[\w$]+\s*\(/, prefix);
+  }
+  // Fallback: if the pattern doesn't match, return as-is
+  return src;
 }
 
 // ── Message Loop ───────────────────────────────────────────────────
@@ -360,8 +424,7 @@ function installMessageDispatcher(): void {
     }
 
     if (_genserverHandler) {
-      _genserverHandler(msg);
-      return;
+      return _genserverHandler(msg);
     }
   });
 }

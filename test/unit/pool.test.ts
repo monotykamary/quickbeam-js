@@ -107,7 +107,7 @@ describe("Pool", () => {
       pool.checkin(w3);
     });
 
-    it.skip("should use LIFO strategy when specified", async () => {
+    it("should use LIFO strategy when specified", async () => {
       const pool = await Pool.start({
         name: "lifo_pool",
         size: 2,

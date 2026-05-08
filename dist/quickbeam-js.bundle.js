@@ -199,22 +199,6 @@
 	function isMockEnvironment() {
 		return globalThis.__quickbeam_mock !== undefined;
 	}
-	let _libraryBootstrap = null;
-	function getLibraryBootstrap() {
-		if (_libraryBootstrap) return _libraryBootstrap;
-		_libraryBootstrap = `
-if (typeof QuickbeamJs === "undefined") {
-  if (typeof require === "undefined") {
-    throw new Error("QuickbeamJs not loaded. Ensure quickbeam-js is pre-loaded.");
-  }
-}
-const { GenServer: _QbGenServer, runGenServerLoop } = QuickbeamJs;
-`.trim();
-		return _libraryBootstrap;
-	}
-	function resetLibraryBootstrap() {
-		_libraryBootstrap = null;
-	}
 	var GenServer = class {
 		async init(_args) {
 			return undefined;
@@ -255,6 +239,7 @@ const { GenServer: _QbGenServer, runGenServerLoop } = QuickbeamJs;
 		* Make a synchronous call to a GenServer.
 		*/
 		static async call(target, message, timeout) {
+			installMessageDispatcher();
 			const ms = timeout ?? 5e3;
 			const pid = resolveTarget(target);
 			const ref = Beam.makeRef();
@@ -314,36 +299,88 @@ const { GenServer: _QbGenServer, runGenServerLoop } = QuickbeamJs;
 		return pid;
 	}
 	async function spawnRealGenServer(_cls, _instance, _initialState, name, args) {
-		const classSource = _cls.toString();
 		const argsJson = JSON.stringify(args ?? null);
 		const nameJson = JSON.stringify(name ?? null);
-		const bootstrap = getLibraryBootstrap();
-		const script = `
-${bootstrap}
-
-const GenServer = _QbGenServer;
-
-const _UserClass = (${classSource});
-Object.setPrototypeOf(_UserClass.prototype, _QbGenServer.prototype);
-Object.setPrototypeOf(_UserClass, _QbGenServer);
-
-const _inst = new _UserClass();
-const _args = ${argsJson};
-const _name = ${nameJson};
-
-_inst.init(_args).then(function(_state) {
-  if (_name) Beam.register(_name);
-  runGenServerLoop(_inst, _state);
-}).catch(function(err) { throw err; });
-`.trim();
+		const methodSources = captureOverriddenMethods(_instance);
+		const libSrc = globalThis.__quickbeam_js_source__ || "";
+		const genServerSetup = [
+			"if (typeof QuickbeamJs === \"undefined\") {",
+			"  throw new Error(\"QuickbeamJs could not be loaded in spawned process\");",
+			"}",
+			"var GenServer = QuickbeamJs.GenServer;",
+			"var runGenServerLoop = QuickbeamJs.runGenServerLoop;",
+			"",
+			"var _inst = Object.create(GenServer.prototype);",
+			methodSources,
+			"",
+			"var _args = " + argsJson + ";",
+			"var _name = " + nameJson + ";",
+			"",
+			"_inst.init(_args).then(function(_state) {",
+			"  if (_name) Beam.register(_name);",
+			"  runGenServerLoop(_inst, _state);",
+			"}).catch(function(err) { throw err; });"
+		].join("\n");
+		const script = libSrc + ";\n" + genServerSetup;
 		const pid = Beam.spawn(script);
 		Beam.link(pid);
 		return pid;
 	}
+	/**
+	* Capture overridden method implementations from a GenServer instance.
+	*
+	* Instead of serializing the entire class (which fails in QuickBEAM's
+	* eval scope due to prototype chain manipulation limits), we capture
+	* each overridden method's source and reassign on the new instance.
+	*
+	* Class method toString() produces "async handleCall(op, from, state) { ... }"
+	* (named function expressions). QuickJS doesn't support named async function
+	* expressions as standalone statements. We strip the name to produce
+	* "async function(op, from, state) { ... }" (anonymous form).
+	*/
+	function captureOverriddenMethods(instance) {
+		const methods = [];
+		const baseProto = GenServer.prototype;
+		const overridableMethods = [
+			"handleCall",
+			"handleCast",
+			"handleInfo",
+			"terminate",
+			"codeChange"
+		];
+		for (const methodName of overridableMethods) {
+			const own = instance[methodName];
+			const base = baseProto[methodName];
+			if (typeof own === "function" && own !== base) {
+				const src = methodToString(own);
+				methods.push("_inst." + methodName + " = " + src + ";");
+			}
+		}
+		const initFn = instance.init;
+		if (typeof initFn === "function" && initFn !== baseProto.init) {
+			methods.push("_inst.init = " + methodToString(initFn) + ";");
+		}
+		return methods.join("\n");
+	}
+	/**
+	* Convert a class method's toString() output into an anonymous function expression.
+	*
+	* Input:  "async handleCall(op, from, state) { ... }"
+	* Output: "async function(op, from, state) { ... }"
+	*/
+	function methodToString(fn) {
+		const src = fn.toString();
+		const match = src.match(/^(async\s+)?([\w$]+)\s*\(/);
+		if (match) {
+			const prefix = match[1] ? "async function(" : "function(";
+			return src.replace(/^(async\s+)?[\w$]+\s*\(/, prefix);
+		}
+		return src;
+	}
 	async function runLoop(instance, initialState, _name) {
 		let state = initialState;
 		const selfPid = Beam.self();
-		Beam.onMessage(async (msg) => {
+		setGenServerHandler(async (msg) => {
 			state = await dispatch(instance, msg, state, selfPid);
 		});
 	}
@@ -428,7 +465,38 @@ _inst.init(_args).then(function(_state) {
 		return m;
 	}
 	function refKey(ref) {
-		return "ref:" + (ref.id ?? String(ref));
+		const data = ref.__beam_data__;
+		if (data instanceof Uint8Array) {
+			let hex = "";
+			for (let i = 0; i < data.length; i++) {
+				hex += data[i].toString(16).padStart(2, "0");
+			}
+			return "ref:" + hex;
+		}
+		return "ref:" + String(ref);
+	}
+	let _genserverHandler = null;
+	function installMessageDispatcher() {
+		Beam.onMessage((msg) => {
+			if (msg && msg.type === "reply") {
+				const replyMsg = msg;
+				const handlers = globalThis.__quickbeam_js_reply_handlers;
+				if (handlers) {
+					const handler = handlers.get(refKey(replyMsg.ref));
+					if (handler) {
+						handler(replyMsg);
+						return;
+					}
+				}
+			}
+			if (_genserverHandler) {
+				return _genserverHandler(msg);
+			}
+		});
+	}
+	function setGenServerHandler(handler) {
+		_genserverHandler = handler;
+		installMessageDispatcher();
 	}
 
 //#endregion
@@ -1048,7 +1116,19 @@ _inst.init(_args).then(function(_state) {
 		return pool;
 	} };
 	function pidsEqual(a, b) {
-		return a.__beam_type__ === "pid" && b.__beam_type__ === "pid" && (a.id === b.id || a.__beam_data__ === b.__beam_data__);
+		if (a.__beam_type__ !== "pid" || b.__beam_type__ !== "pid") {
+			return false;
+		}
+		const aData = a.__beam_data__;
+		const bData = b.__beam_data__;
+		if (aData !== undefined && bData !== undefined) {
+			if (aData.length !== bData.length) return false;
+			for (let i = 0; i < aData.length; i++) {
+				if (aData[i] !== bData[i]) return false;
+			}
+			return true;
+		}
+		return a.id === b.id;
 	}
 
 //#endregion
@@ -1228,7 +1308,7 @@ _inst.init(_args).then(function(_state) {
 
 //#endregion
 //#region index.ts
-	var __tmpSMXAxv_exports = /* @__PURE__ */ __export({
+	var __tmpEouCEu_exports = /* @__PURE__ */ __export({
 		Application: () => Application,
 		Beam: () => Beam,
 		BeamOtpError: () => BeamOtpError,
@@ -1240,6 +1320,7 @@ _inst.init(_args).then(function(_state) {
 		findCause: () => findCause,
 		getBeam: () => getBeam,
 		retry: () => retry,
+		runGenServerLoop: () => runGenServerLoop,
 		setMockBeam: () => setMockBeam,
 		sleep: () => sleep,
 		withTimeout: () => withTimeout
@@ -1247,7 +1328,7 @@ _inst.init(_args).then(function(_state) {
 
 //#endregion
 //#region __entry.ts
-	globalThis.QuickbeamJs = __tmpSMXAxv_exports;
+	globalThis.QuickbeamJs = __tmpEouCEu_exports;
 
 //#endregion
 })();
