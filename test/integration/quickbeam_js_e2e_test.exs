@@ -27,10 +27,6 @@ defmodule QuickbeamJsE2ETest do
     QuickBEAM.set_global(rt, "__quickbeam_js_source__", @bundle)
   end
 
-  # ══════════════════════════════════════════════════════════════════
-  # BEAM PRIMITIVES (QuickBEAM native API)
-  # ══════════════════════════════════════════════════════════════════
-
   describe "QuickBEAM native Beam API" do
     test "Beam.self() returns a PID", %{runtime: rt} do
       {:ok, result} = QuickBEAM.eval(rt, "typeof Beam.self()")
@@ -152,10 +148,6 @@ defmodule QuickbeamJsE2ETest do
     end
   end
 
-  # ══════════════════════════════════════════════════════════════════
-  # LIBRARY LOADING
-  # ══════════════════════════════════════════════════════════════════
-
   describe "quickbeam-js library loading" do
     test "library loads and exports QuickbeamJs global", %{runtime: rt} do
       load_lib(rt)
@@ -238,10 +230,6 @@ defmodule QuickbeamJsE2ETest do
       assert result["attempts"] == 2
     end
   end
-
-  # ══════════════════════════════════════════════════════════════════
-  # GenServer — the core OTP pattern
-  # ══════════════════════════════════════════════════════════════════
 
   describe "GenServer" do
     # NOTE: GenServer startLink uses Beam.spawn() which creates a fresh
@@ -396,10 +384,6 @@ defmodule QuickbeamJsE2ETest do
     end
   end
 
-  # ══════════════════════════════════════════════════════════════════
-  # Supervisor — crash recovery across Beam.spawn
-  # ══════════════════════════════════════════════════════════════════
-
   # NOTE: Supervisor tests require GenServer.startLink to use
   # _cls.toString() for class reconstruction in spawn scripts.
   # The dynamic toString() approach has a known issue with QuickBEAM's
@@ -513,10 +497,6 @@ defmodule QuickbeamJsE2ETest do
       assert result["aPong"] == "pong_a"
     end
   end
-
-  # ══════════════════════════════════════════════════════════════════
-  # QUICKBEAM BRIDGE INTEGRATION
-  # ══════════════════════════════════════════════════════════════════
 
   describe "QuickBEAM ↔ JS data round-trip" do
     test "Beam.setGlobal / Beam.getGlobal round-trips data", %{runtime: rt} do
