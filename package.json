@@ -48,6 +48,5 @@
     "erlang",
     "elixir",
     "actor-model"
-  ],
-  "packageManager": "pnpm@11.20.0"
+  ]
 }
